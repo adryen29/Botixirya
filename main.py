@@ -53,7 +53,6 @@ class GiveawayView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    # Correction ici : discord.ButtonStyle au lieu de discord.ui.ButtonStyle
     @discord.ui.button(label="Participer ! 🎉", style=discord.ButtonStyle.blurple, custom_id="join_gw")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_giveaway()
@@ -90,7 +89,7 @@ async def check_giveaways():
                     message = await channel.fetch_message(int(msg_id))
                     participants = gw['participants']
                     if len(participants) < gw['winners_count']:
-                        await channel.send(f"Pas assez de participants pour **{gw['prize']}**.")
+                        await channel.send(f"Pas assez de participants pour la récompense **{gw['prize']}**.")
                     else:
                         winners = random.sample(participants, gw['winners_count'])
                         mentions = ", ".join([f"<@{w}>" for w in winners])
@@ -98,7 +97,7 @@ async def check_giveaways():
                         embed.description = f"Terminé !\nGagnant(s) : {mentions}"
                         embed.color = discord.Color.black()
                         await message.edit(embed=embed)
-                        await channel.send(f"🎉 Félicitations {mentions} ! Vous gagnez **{gw['prize']}** !")
+                        await channel.send(f"🎉 Félicitations {mentions} ! Vous gagnez : **{gw['prize']}** !")
                 except: pass
             gw['ended'] = True
             save_giveaway(data)
@@ -114,7 +113,7 @@ async def on_ready():
         check_giveaways.start()
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        await log_channel.send(f"✅ **Botixirya** en ligne. Erreur ButtonStyle corrigée. Préfixe : `{COMMAND_PREFIX}`")
+        await log_channel.send(f"✅ **Botixirya** en ligne. Préfixe : `{COMMAND_PREFIX}`")
 
 @bot.event
 async def on_message(message):
@@ -147,8 +146,8 @@ async def help(ctx):
     ), inline=False)
     
     embed.add_field(name="🎁 Giveaways (Admin)", value=(
-        f"**{COMMAND_PREFIX}giveaway [minutes] [gagnants] [prix] [condition]** : Lance un concours.\n"
-        f"*Note: Le temps est maintenant en minutes.*"
+        f"**{COMMAND_PREFIX}giveaway [minutes] [gagnants] [récompense] [condition]** : Lance un concours.\n"
+        f"*Note: Le temps est en minutes.*"
     ), inline=False)
     
     embed.add_field(name="🕹️ Divers", value=(
@@ -183,7 +182,7 @@ async def restore(ctx):
 async def giveaway(ctx, minutes: int, winners: int, prize: str, *, req: str = "Aucune"):
     end_time = time.time() + (minutes * 60)
     embed = discord.Embed(title="🎉 GIVEAWAY 🎉", color=discord.Color.gold())
-    embed.add_field(name="Prix", value=prize, inline=False)
+    embed.add_field(name="Récompense", value=prize, inline=False)
     embed.add_field(name="Fin dans", value=f"<t:{int(end_time)}:R>", inline=True)
     embed.add_field(name="Gagnants", value=str(winners), inline=True)
     embed.add_field(name="Condition", value=req, inline=False)
