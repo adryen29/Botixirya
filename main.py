@@ -9,7 +9,7 @@ from threading import Thread
 # ==========================================
 COMMAND_PREFIX = "<aav>"
 COUNTING_CHANNEL_ID = 1478440739095580822
-LOG_CHANNEL_ID = 1478437400496705721  # Ton salon de logs précédent
+LOG_CHANNEL_ID = 1478437400496705721
 # ==========================================
 
 # 1. Configuration du mini serveur Web pour Koyeb
@@ -33,7 +33,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
-# Variable globale pour stocker le nombre actuel et le dernier utilisateur
+# Variables globales pour le comptage
 current_count = 0
 last_user_id = None
 
@@ -42,45 +42,33 @@ async def on_ready():
     print(f'Connecté en tant que {bot.user}')
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        await log_channel.send(f"✅ **{bot.user.name}** est en ligne. Préfixe actuel : `{COMMAND_PREFIX}`")
+        await log_channel.send(f"✅ **{bot.user.name}** est en ligne. Préfixe : `{COMMAND_PREFIX}`")
 
 @bot.event
 async def on_message(message):
     global current_count, last_user_id
-
-    # Ne pas répondre à soi-même
     if message.author == bot.user:
         return
 
     # Logique du jeu de comptage
     if message.channel.id == COUNTING_CHANNEL_ID:
         try:
-            content = message.content.strip()
-            # On vérifie si le message est un nombre
-            number = int(content)
-
-            # Vérification : n+1 et pas le même utilisateur deux fois
+            number = int(message.content.strip())
             if number == current_count + 1 and message.author.id != last_user_id:
                 current_count = number
                 last_user_id = message.author.id
                 await message.add_reaction("✅")
             else:
-                # Erreur : on recommence à 0
                 current_count = 0
                 last_user_id = None
                 await message.add_reaction("❌")
-                
-                reason = "Mauvais nombre !" if number != current_count + 1 else "Tu ne peux pas compter deux fois de suite !"
-                await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! **{reason}** Le prochain nombre est **1**.")
-
+                await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Le prochain nombre est **1**.")
         except ValueError:
-            # Si ce n'est pas un nombre, on ignore ou on peut aussi casser la suite
             pass
 
-    # Important pour que les commandes fonctionnent encore
     await bot.process_commands(message)
 
-# 3. Gestionnaire d'erreurs (envoie dans #bot-logs)
+# 3. Gestionnaire d'erreurs (Logs Discord)
 @bot.event
 async def on_command_error(ctx, error):
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -89,18 +77,49 @@ async def on_command_error(ctx, error):
         embed.add_field(name="Commande", value=ctx.message.content)
         embed.add_field(name="Erreur", value=f"```py\n{error}\n```")
         await channel.send(embed=embed)
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("🚫 Tu n'as pas la permission d'utiliser cette commande.")
 
-# 4. Commandes
+# 4. Commandes de Modération (Lock/Unlock/Restore)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def lock(ctx):
+    """Verrouille le salon pour tout le monde sauf les admins"""
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send(f"🔒 Ce salon a été verrouillé par {ctx.author.mention}.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def unlock(ctx):
+    """Déverrouille le salon"""
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    await ctx.send(f"🔓 Ce salon est de nouveau ouvert.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def restore(ctx):
+    """Clone le salon actuel et supprime l'ancien pour nettoyer le chat"""
+    await ctx.send("🔄 Restauration du salon en cours...")
+    
+    # Cloner le salon (garde les permissions, la catégorie, etc.)
+    new_channel = await ctx.channel.clone(reason="Commande restore utilisée")
+    
+    # Placer le nouveau salon au même endroit que l'ancien
+    await new_channel.edit(position=ctx.channel.position)
+    
+    # Supprimer l'ancien salon
+    await ctx.channel.delete(reason="Restauration du salon")
+    
+    # Envoyer un message dans le nouveau salon
+    await new_channel.send(f"✨ Salon restauré avec succès par {ctx.author.mention}. Le chat est propre.")
+
+# 5. Autres Commandes
 @bot.command()
 async def ping(ctx):
     await ctx.send('Pong ! 🏓')
 
-@bot.command()
-async def score(ctx):
-    """Affiche le score actuel du comptage"""
-    await ctx.send(f"Le score actuel est de **{current_count}**. Le prochain est **{current_count + 1}** !")
-
-# 5. Lancement
+# 6. Lancement
 if __name__ == "__main__":
     keep_alive()
     token = os.getenv('DISCORD_TOKEN')
