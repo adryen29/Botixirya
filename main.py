@@ -1,9 +1,16 @@
 import discord
 from discord.ext import commands
 import os
-import traceback
 from flask import Flask
 from threading import Thread
+
+# ==========================================
+# VARIABLES MODIFIABLES (VISIBLES)
+# ==========================================
+COMMAND_PREFIX = "<aav>"
+COUNTING_CHANNEL_ID = 1478440739095580822
+LOG_CHANNEL_ID = 1478437400496705721  # Ton salon de logs précédent
+# ==========================================
 
 # 1. Configuration du mini serveur Web pour Koyeb
 app = Flask('')
@@ -24,56 +31,80 @@ def keep_alive():
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+
+# Variable globale pour stocker le nombre actuel et le dernier utilisateur
+current_count = 0
+last_user_id = None
 
 @bot.event
 async def on_ready():
-    print(f'Connecté avec succès en tant que {bot.user}')
-    # Notification au démarrage dans le salon de logs
-    channel_id = os.getenv('LOG_CHANNEL_ID')
-    if channel_id:
-        channel = bot.get_channel(int(channel_id))
-        if channel:
-            await channel.send(f"✅ **{bot.user.name}** est maintenant en ligne et surveille les erreurs.")
+    print(f'Connecté en tant que {bot.user}')
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"✅ **{bot.user.name}** est en ligne. Préfixe actuel : `{COMMAND_PREFIX}`")
 
-# 3. Gestionnaire d'erreurs automatique
+@bot.event
+async def on_message(message):
+    global current_count, last_user_id
+
+    # Ne pas répondre à soi-même
+    if message.author == bot.user:
+        return
+
+    # Logique du jeu de comptage
+    if message.channel.id == COUNTING_CHANNEL_ID:
+        try:
+            content = message.content.strip()
+            # On vérifie si le message est un nombre
+            number = int(content)
+
+            # Vérification : n+1 et pas le même utilisateur deux fois
+            if number == current_count + 1 and message.author.id != last_user_id:
+                current_count = number
+                last_user_id = message.author.id
+                await message.add_reaction("✅")
+            else:
+                # Erreur : on recommence à 0
+                current_count = 0
+                last_user_id = None
+                await message.add_reaction("❌")
+                
+                reason = "Mauvais nombre !" if number != current_count + 1 else "Tu ne peux pas compter deux fois de suite !"
+                await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! **{reason}** Le prochain nombre est **1**.")
+
+        except ValueError:
+            # Si ce n'est pas un nombre, on ignore ou on peut aussi casser la suite
+            pass
+
+    # Important pour que les commandes fonctionnent encore
+    await bot.process_commands(message)
+
+# 3. Gestionnaire d'erreurs (envoie dans #bot-logs)
 @bot.event
 async def on_command_error(ctx, error):
-    # On récupère l'ID du salon de logs
-    channel_id = os.getenv('LOG_CHANNEL_ID')
-    
-    if channel_id:
-        channel = bot.get_channel(int(channel_id))
-        if channel:
-            # Création d'un message d'erreur détaillé (Embed)
-            embed = discord.Embed(
-                title="❌ Erreur détectée",
-                description=f"Une erreur est survenue lors de l'exécution d'une commande.",
-                color=discord.Color.red()
-            )
-            embed.add_field(name="Commande", value=ctx.command.name if ctx.command else "Inconnue", inline=True)
-            embed.add_field(name="Utilisateur", value=ctx.author.mention, inline=True)
-            embed.add_field(name="Erreur", value=f"```py\n{error}\n```", inline=False)
-            
-            await channel.send(embed=embed)
-    
-    # On affiche aussi l'erreur dans la console Koyeb pour être sûr
-    print(f"Erreur commande: {error}")
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(title="❌ Erreur de Commande", color=discord.Color.red())
+        embed.add_field(name="Commande", value=ctx.message.content)
+        embed.add_field(name="Erreur", value=f"```py\n{error}\n```")
+        await channel.send(embed=embed)
 
+# 4. Commandes
 @bot.command()
 async def ping(ctx):
     await ctx.send('Pong ! 🏓')
 
-# 4. Lancement
+@bot.command()
+async def score(ctx):
+    """Affiche le score actuel du comptage"""
+    await ctx.send(f"Le score actuel est de **{current_count}**. Le prochain est **{current_count + 1}** !")
+
+# 5. Lancement
 if __name__ == "__main__":
-    keep_alive() 
-    
+    keep_alive()
     token = os.getenv('DISCORD_TOKEN')
-    
     if token:
-        try:
-            bot.run(token)
-        except Exception as e:
-            print(f"Erreur fatale au lancement : {e}")
+        bot.run(token)
     else:
-        print("Erreur : La variable 'DISCORD_TOKEN' est introuvable.")
+        print("Erreur : DISCORD_TOKEN manquant.")
