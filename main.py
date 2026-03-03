@@ -34,7 +34,7 @@ def keep_alive():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None) # On retire le help par défaut
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 # --- Système de Persistence ---
 def save_giveaway(data):
@@ -109,10 +109,11 @@ last_user_id = None
 @bot.event
 async def on_ready():
     bot.add_view(GiveawayView(bot))
-    check_giveaways.start()
+    if not check_giveaways.is_running():
+        check_giveaways.start()
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        await log_channel.send(f"✅ **Botixirya** opérationnel. Tapez `{COMMAND_PREFIX}help` pour les commandes.")
+        await log_channel.send(f"✅ **Botixirya** opérationnel. Temps de Giveaway : minutes. Préfixe : `{COMMAND_PREFIX}`")
 
 @bot.event
 async def on_message(message):
@@ -135,33 +136,33 @@ async def on_message(message):
 
 @bot.command()
 async def help(ctx):
-    """Affiche la liste des commandes disponibles"""
-    embed = discord.Embed(title="Aide du Bot Botixirya", color=discord.Color.blue(), description=f"Préfixe : `{COMMAND_PREFIX}`")
+    """Affiche la liste des commandes disponibles de façon pertinente"""
+    embed = discord.Embed(title="📜 Aide du Bot Botixirya", color=discord.Color.blue(), description=f"Utilisez le préfixe `{COMMAND_PREFIX}` avant chaque commande.")
     
-    embed.add_field(name="🛠️ Modération (Admin)", value=(
-        f"`{COMMAND_PREFIX}lock` : Verrouille le salon actuel.\n"
-        f"`{COMMAND_PREFIX}unlock` : Déverrouille le salon actuel.\n"
-        f"`{COMMAND_PREFIX}restore` : Nettoie le chat en clonant/supprimant le salon."
+    embed.add_field(name="🛡️ Modération (Administrateurs)", value=(
+        f"**{COMMAND_PREFIX}lock** : Désactive l'envoi de messages pour les membres dans ce salon.\n"
+        f"**{COMMAND_PREFIX}unlock** : Réactive l'envoi de messages pour les membres dans ce salon.\n"
+        f"**{COMMAND_PREFIX}restore** : Supprime le salon actuel et en crée une copie conforme (vide le chat)."
     ), inline=False)
     
-    embed.add_field(name="🎉 Concours (Admin)", value=(
-        f"`{COMMAND_PREFIX}giveaway [h] [gagnants] [prix] [condition]` : Lance un concours.\n"
-        f"Ex: `{COMMAND_PREFIX}giveaway 2 1 Discord_Nitro Niveau_5_requis`"
+    embed.add_field(name="🎁 Événements (Administrateurs)", value=(
+        f"**{COMMAND_PREFIX}giveaway [minutes] [gagnants] [prix] [condition]** : Lance un jeu concours avec participation par bouton.\n"
+        f"*Ex: `{COMMAND_PREFIX}giveaway 10 1 Nitro_Classic_1_mois S'abonner_au_serveur`*"
     ), inline=False)
     
-    embed.add_field(name="🎮 Divers", value=(
-        f"`{COMMAND_PREFIX}ping` : Vérifie la latence du bot.\n"
-        f"`{COMMAND_PREFIX}score` : Affiche le score actuel du salon de comptage."
+    embed.add_field(name="🕹️ Utilitaires & Jeux", value=(
+        f"**{COMMAND_PREFIX}ping** : Mesure la vitesse de réponse (latence) du bot.\n"
+        f"**{COMMAND_PREFIX}score** : Affiche le nombre actuel atteint dans le salon de comptage."
     ), inline=False)
     
-    embed.set_footer(text="Botixirya - Système de surveillance actif")
+    embed.set_footer(text="Système de surveillance des logs actif dans le salon dédié.")
     await ctx.send(embed=embed)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def lock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send("🔒 Salon verrouillé.")
+    await ctx.send("🔒 Salon verrouillé pour les membres.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -172,29 +173,33 @@ async def unlock(ctx):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def restore(ctx):
-    new_channel = await ctx.channel.clone()
+    new_channel = await ctx.channel.clone(reason="Commande restore utilisée")
     await new_channel.edit(position=ctx.channel.position)
     await ctx.channel.delete()
-    await new_channel.send("✨ Salon remis à neuf.")
+    await new_channel.send("✨ Ce salon a été remis à neuf (historique vidé).")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def giveaway(ctx, hours: int, winners: int, prize: str, *, req: str = "Aucune"):
-    end_time = time.time() + (hours * 3600)
-    embed = discord.Embed(title="GIVEAWAY", color=discord.Color.gold())
-    embed.add_field(name="Prix", value=prize)
-    embed.add_field(name="Fin", value=f"<t:{int(end_time)}:R>")
-    embed.add_field(name="Condition", value=req)
+async def giveaway(ctx, minutes: int, winners: int, prize: str, *, req: str = "Aucune"):
+    # Conversion du temps de minutes vers secondes
+    end_time = time.time() + (minutes * 60)
+    embed = discord.Embed(title="🎉 NOUVEAU GIVEAWAY 🎉", color=discord.Color.gold())
+    embed.add_field(name="🎁 Prix", value=f"**{prize}**", inline=False)
+    embed.add_field(name="⏳ Fin dans", value=f"<t:{int(end_time)}:R>", inline=True)
+    embed.add_field(name="👥 Gagnants", value=str(winners), inline=True)
+    embed.add_field(name="📝 Condition", value=req, inline=False)
+    embed.set_footer(text="Cliquez sur le bouton ci-dessous pour participer !")
+    
     msg = await ctx.send(embed=embed, view=GiveawayView(bot))
     data = load_giveaway()
     data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": prize, "winners_count": winners, "end_time": end_time, "participants": [], "ended": False}
     save_giveaway(data)
 
 @bot.command()
-async def ping(ctx): await ctx.send(f"🏓 Pong ! ({round(bot.latency * 1000)}ms)")
+async def ping(ctx): await ctx.send(f"🏓 Pong ! Latence : **{round(bot.latency * 1000)}ms**")
 
 @bot.command()
-async def score(ctx): await ctx.send(f"Score actuel : **{current_count}**.")
+async def score(ctx): await ctx.send(f"🔢 Le score actuel du comptage est : **{current_count}**.")
 
 # --- Lancement ---
 if __name__ == "__main__":
