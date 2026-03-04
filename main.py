@@ -15,6 +15,7 @@ from threading import Thread
 COMMAND_PREFIX = "<aav>"
 COUNTING_CHANNEL_ID = 1478440739095580822
 LOG_CHANNEL_ID = 1478437400496705721
+AUTOROLE_ID = 1478658867415089263  # ID du rôle UNVERRIFIED
 GIVEAWAY_FILE = "giveaways.json"
 # ==========================================
 
@@ -34,7 +35,7 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members = True # Nécessaire pour l'Auto-role et les Giveaways
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 # --- Gestion des données ---
@@ -70,7 +71,6 @@ class GiveawayView(discord.ui.View):
         
         data[gw_id]['participants'].append(interaction.user.id)
         save_giveaway(data)
-        # Log de participation supprimé ici pour éviter le spam
         await interaction.response.send_message("Ta participation a été enregistrée !", ephemeral=True)
 
     @discord.ui.button(label="Reroll 🎲", style=discord.ButtonStyle.gray, custom_id="reroll_gw")
@@ -85,7 +85,7 @@ class GiveawayView(discord.ui.View):
         
         winner_id = random.choice(data[gw_id]['participants'])
         await interaction.channel.send(f"🎲 **Reroll :** Le nouveau gagnant est <@{winner_id}> !")
-        await send_log(f"🎲 **Reroll** : {interaction.user.mention} a relancé le tirage du giveaway `{gw_id}`. Nouveau gagnant : <@{winner_id}>.")
+        await send_log(f"🎲 **Reroll** : {interaction.user.mention} a relancé le tirage du giveaway `{gw_id}`.")
         await interaction.response.send_message("Reroll effectué.", ephemeral=True)
 
     @discord.ui.button(label="Annuler ❌", style=discord.ButtonStyle.danger, custom_id="delete_gw")
@@ -100,7 +100,7 @@ class GiveawayView(discord.ui.View):
             save_giveaway(data)
         
         await interaction.message.delete()
-        await send_log(f"🗑️ **Suppression** : {interaction.user.mention} a annulé et supprimé le giveaway `{gw_id}`.")
+        await send_log(f"🗑️ **Suppression** : {interaction.user.mention} a annulé le giveaway `{gw_id}`.")
 
 @tasks.loop(seconds=30)
 async def check_giveaways():
@@ -115,7 +115,7 @@ async def check_giveaways():
                     participants = gw['participants']
                     if len(participants) < gw['winners_count']:
                         await channel.send(f"Fin : Pas assez de participants pour **{gw['prize']}**.")
-                        await send_log(f"📉 **Giveaway Terminé** : `{msg_id}` s'est fini sans assez de participants.")
+                        await send_log(f"📉 **Giveaway Terminé** : `{msg_id}` fini sans assez de participants.")
                     else:
                         winners = random.sample(participants, gw['winners_count'])
                         mentions = ", ".join([f"<@{w}>" for w in winners])
@@ -124,7 +124,7 @@ async def check_giveaways():
                         embed.color = discord.Color.black()
                         await message.edit(embed=embed, view=None)
                         await channel.send(f"🎉 Félicitations {mentions} ! Vous gagnez : **{gw['prize']}** !")
-                        await send_log(f"🏆 **Giveaway Terminé** : Gagnant(s) {mentions} pour la récompense **{gw['prize']}**.")
+                        await send_log(f"🏆 **Giveaway Terminé** : Gagnant(s) {mentions} pour **{gw['prize']}**.")
                 except: pass
             gw['ended'] = True
             save_giveaway(data)
@@ -138,8 +138,21 @@ async def on_ready():
     bot.add_view(GiveawayView(bot))
     if not check_giveaways.is_running():
         check_giveaways.start()
-    await send_log(f"✅ **Botixirya** en ligne. Logs de participation désactivés (anti-spam).")
+    await send_log(f"✅ **Botixirya** en ligne. Auto-role activé.")
     print(f"Connecté : {bot.user}")
+
+@bot.event
+async def on_member_join(member):
+    """Système Auto-role : Attribue le rôle UNVERRIFIED aux nouveaux membres"""
+    role = member.guild.get_role(AUTOROLE_ID)
+    if role:
+        try:
+            await member.add_roles(role)
+            await send_log(f"👤 **Auto-role** : {member.mention} a reçu le rôle `{role.name}`.")
+        except Exception as e:
+            await send_log(f"⚠️ **Erreur Auto-role** : Impossible de donner le rôle à {member.mention}. (Vérifiez la hiérarchie des rôles)")
+    else:
+        await send_log(f"⚠️ **Erreur Auto-role** : Rôle ID `{AUTOROLE_ID}` introuvable.")
 
 @bot.event
 async def on_message(message):
@@ -165,18 +178,17 @@ async def help(ctx):
     """Affiche les commandes avec leur description pertinente"""
     embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
     embed.add_field(name="🛡️ Modération (Admin)", value=(
-        f"**{COMMAND_PREFIX}lock** : Bloque l'envoi de messages dans le salon.\n"
-        f"**{COMMAND_PREFIX}unlock** : Autorise à nouveau l'envoi de messages.\n"
-        f"**{COMMAND_PREFIX}restore** : Recrée le salon à l'identique pour le nettoyer."
+        f"**{COMMAND_PREFIX}lock** : Verrouille le salon.\n"
+        f"**{COMMAND_PREFIX}unlock** : Déverrouille le salon.\n"
+        f"**{COMMAND_PREFIX}restore** : Nettoie le salon actuel."
     ), inline=False)
     embed.add_field(name="🎁 Giveaways (Admin)", value=(
         f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [récompense] [condition]**\n"
-        f"Lance un concours. Inclus des boutons pour **Participer**, **Reroll** ou **Annuler**.\n"
-        f"*Exemple : {COMMAND_PREFIX}giveaway [60] [1] [Récompense] [Condition]*"
+        f"Lance un concours avec boutons **Participer**, **Reroll** et **Annuler**."
     ), inline=False)
     embed.add_field(name="🕹️ Divers", value=(
-        f"**{COMMAND_PREFIX}ping** : Latence actuelle du bot.\n"
-        f"**{COMMAND_PREFIX}score** : Score actuel du salon de comptage."
+        f"**{COMMAND_PREFIX}ping** : Latence du bot.\n"
+        f"**{COMMAND_PREFIX}score** : Score actuel du comptage."
     ), inline=False)
     await ctx.send(embed=embed)
 
@@ -225,8 +237,7 @@ async def giveaway(ctx, *, args):
     data = load_giveaway()
     data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": prize, "winners_count": winners, "end_time": end_time, "participants": [], "ended": False}
     save_giveaway(data)
-    
-    await send_log(f"🎁 **Nouveau Giveaway** : Lancé par {ctx.author.mention} dans <#{ctx.channel.id}>.\n**Récompense** : {prize} | **ID** : `{msg.id}`")
+    await send_log(f"🎁 **Nouveau Giveaway** lancé par {ctx.author.mention} | ID : `{msg.id}`")
 
 @bot.command()
 async def ping(ctx): await ctx.send(f"🏓 Pong ! (**{round(bot.latency * 1000)}ms**)")
