@@ -206,16 +206,20 @@ async def on_message(message):
             content = message.content.strip()
             if content.isdigit():
                 number = int(content)
-                # On vérifie si c'est le bon nombre ET que ce n'est pas le même utilisateur
+                
+                # Chargement dynamique pour éviter les conflits de déploiement
+                temp_count, temp_user = load_counting()
+                if temp_count > current_count:
+                    current_count = temp_count
+                    last_user_id = temp_user
+
                 if number == current_count + 1 and message.author.id != last_user_id:
                     current_count, last_user_id = number, message.author.id
                     save_counting(current_count, last_user_id) 
                     await message.add_reaction("✅")
-                elif number == current_count:
-                    # On ignore si l'utilisateur répète le même chiffre par erreur
+                elif number <= current_count:
                     return
                 else:
-                    # Mauvais chiffre : Réinitialisation
                     current_count, last_user_id = 0, None
                     save_counting(0, None) 
                     await message.add_reaction("❌")
@@ -240,11 +244,23 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [récompense] [condition]**\n"
         f"Lance un concours avec boutons **Participer**, **Reroll** et **Annuler**."
     ), inline=False)
-    embed.add_field(name="🕹️ Divers", value=(
+    embed.add_field(name="🕹️ Divers & Gestion", value=(
         f"**{COMMAND_PREFIX}ping** : Latence du bot.\n"
-        f"**{COMMAND_PREFIX}score** : Score actuel du comptage (sauvegardé)."
+        f"**{COMMAND_PREFIX}score** : Score actuel du comptage (sauvegardé).\n"
+        f"**{COMMAND_PREFIX}setscore [nombre]** : (Admin) Définit manuellement le score de comptage."
     ), inline=False)
     await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setscore(ctx, number: int):
+    """Définit manuellement le score de comptage"""
+    global current_count, last_user_id
+    current_count = number
+    last_user_id = None
+    save_counting(current_count, last_user_id)
+    await ctx.send(f"✅ Le score de comptage a été manuellement défini sur **{number}**.")
+    await send_log(f"⚙️ **Configuration** : {ctx.author.mention} a forcé le score de comptage à `{number}`.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
