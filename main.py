@@ -203,16 +203,23 @@ async def on_message(message):
     
     if message.channel.id == COUNTING_CHANNEL_ID:
         try:
-            number = int(message.content.strip())
-            if number == current_count + 1 and message.author.id != last_user_id:
-                current_count, last_user_id = number, message.author.id
-                save_counting(current_count, last_user_id) 
-                await message.add_reaction("✅")
-            else:
-                current_count, last_user_id = 0, None
-                save_counting(0, None) 
-                await message.add_reaction("❌")
-                await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
+            content = message.content.strip()
+            if content.isdigit():
+                number = int(content)
+                # On vérifie si c'est le bon nombre ET que ce n'est pas le même utilisateur
+                if number == current_count + 1 and message.author.id != last_user_id:
+                    current_count, last_user_id = number, message.author.id
+                    save_counting(current_count, last_user_id) 
+                    await message.add_reaction("✅")
+                elif number == current_count:
+                    # On ignore si l'utilisateur répète le même chiffre par erreur
+                    return
+                else:
+                    # Mauvais chiffre : Réinitialisation
+                    current_count, last_user_id = 0, None
+                    save_counting(0, None) 
+                    await message.add_reaction("❌")
+                    await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
         except ValueError: pass
         
     await bot.process_commands(message)
