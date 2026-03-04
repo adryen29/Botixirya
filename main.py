@@ -116,20 +116,15 @@ last_user_id = None
 @bot.event
 async def on_ready():
     global current_count, last_user_id
-    # Ré-enregistrement des vues pour qu'elles fonctionnent après redémarrage
     bot.add_view(VerifyView())
     bot.add_view(GiveawayView())
-    
-    # Chargement des données sauvegardées
     current_count, last_user_id = load_counting()
-    
     if not check_giveaways.is_running():
         check_giveaways.start()
     print(f"✅ Botixirya en ligne | Score actuel : {current_count}")
 
 @bot.event
 async def on_member_join(member):
-    """Auto-role immédiat à l'arrivée"""
     role = member.guild.get_role(ROLE_UNVERIFIED_ID)
     if role:
         try: await member.add_roles(role)
@@ -140,7 +135,6 @@ async def on_message(message):
     global current_count, last_user_id
     if message.author.bot: return
 
-    # --- Logique de Comptage ---
     if message.channel.id == COUNTING_CHANNEL_ID:
         try:
             val = int(message.content.strip())
@@ -149,7 +143,7 @@ async def on_message(message):
                 save_counting(current_count, last_user_id)
                 await message.add_reaction("✅")
             elif val == current_count:
-                pass # Évite de briser la suite si le bot traite deux fois le même message
+                pass
             else:
                 current_count, last_user_id = 0, None
                 save_counting(0, None)
@@ -167,13 +161,9 @@ async def setup_verify(ctx):
     """Installe le message de vérification avec bouton"""
     chan = bot.get_channel(VERIFY_CHANNEL_ID)
     if chan:
-        embed = discord.Embed(
-            title="🛡️ Vérification du Serveur",
-            description="Clique sur le bouton ci-dessous pour confirmer ton identité et accéder aux salons.",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(title="🛡️ Vérification", description="Clique ci-dessous pour accéder au serveur.", color=discord.Color.blue())
         await chan.send(embed=embed, view=VerifyView())
-        await ctx.send("✅ Système de vérification déployé avec succès.")
+        await ctx.send("✅ Système de vérification déployé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -181,16 +171,11 @@ async def giveaway(ctx, *, args):
     """Lance un giveaway : [min] [gagnants] [prix] [condition]"""
     m = re.findall(r'\[(.*?)\]', args)
     if len(m) < 4: return await ctx.send(f"Usage: `{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]`")
-    
     mins, wins, prize, cond = int(m[0]), int(m[1]), m[2], m[3]
     end = time.time() + (mins * 60)
-    
     embed = discord.Embed(title="🎉 NOUVEAU GIVEAWAY 🎉", color=discord.Color.gold())
     embed.add_field(name="Prix", value=prize, inline=False)
-    embed.add_field(name="Gagnants", value=str(wins), inline=True)
     embed.add_field(name="Fin", value=f"<t:{int(end)}:R>", inline=True)
-    embed.add_field(name="Condition", value=cond, inline=False)
-    
     msg = await ctx.send(embed=embed, view=GiveawayView())
     data = load_giveaway()
     data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": prize, "winners_count": wins, "end_time": end, "participants": [], "ended": False}
@@ -199,28 +184,20 @@ async def giveaway(ctx, *, args):
 @bot.command()
 async def score(ctx):
     """Affiche le score actuel de la suite de nombres"""
-    await ctx.send(f"🔢 Le score actuel de la suite est de **{current_count}**.")
+    await ctx.send(f"🔢 Le score actuel est de **{current_count}**.")
 
 @bot.command()
 async def help(ctx):
     """Affiche toutes les commandes et leur utilité"""
-    embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue(), description=f"Préfixe : `{COMMAND_PREFIX}`")
-    embed.add_field(name="🛠️ Administration", value=(
-        f"`{COMMAND_PREFIX}setup_verify` : Installe le bouton de vérification.\n"
-        f"`{COMMAND_PREFIX}giveaway` : Lance un concours [min] [gagnants] [prix] [cond]."
-    ), inline=False)
-    embed.add_field(name="🎮 Général", value=(
-        f"`{COMMAND_PREFIX}score` : Voir l'avancée du comptage.\n"
-        f"`{COMMAND_PREFIX}ping` : Latence du bot."
-    ), inline=False)
+    embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
+    embed.add_field(name="🛠️ Admin", value=f"`{COMMAND_PREFIX}setup_verify`, `{COMMAND_PREFIX}giveaway`", inline=False)
+    embed.add_field(name="🎮 Général", value=f"`{COMMAND_PREFIX}score`, `{COMMAND_PREFIX}ping`", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 async def ping(ctx):
     """Mesure la latence du bot"""
-    await ctx.send(f"🏓 Pong ! Latence : `{round(bot.latency * 1000)}ms` ")
+    await ctx.send(f"🏓 Pong ! `{round(bot.latency * 1000)}ms` ")
 
-# --- Démarrage ---
 token = os.getenv('DISCORD_TOKEN')
-if token:
-    bot.run(token)
+if token: bot.run(token)
