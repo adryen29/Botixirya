@@ -180,10 +180,13 @@ async def on_ready():
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
     
+    # Rechargement forcé au démarrage
     current_count, last_user_id = load_counting()
     
     if not check_giveaways.is_running():
         check_giveaways.start()
+    
+    # On log le score RÉELLEMENT chargé
     await send_log(f"✅ **Botixirya** en ligne. Score de comptage restauré : `{current_count}`.")
     print(f"Connecté : {bot.user} | Score : {current_count}")
 
@@ -202,23 +205,23 @@ async def on_message(message):
     if message.author == bot.user: return
     
     if message.channel.id == COUNTING_CHANNEL_ID:
+        # On recharge depuis le fichier à CHAQUE message pour éviter les désynchronisations
+        current_count, last_user_id = load_counting()
+        
         try:
             content = message.content.strip()
             if content.isdigit():
                 number = int(content)
                 
-                temp_count, temp_user = load_counting()
-                if temp_count > current_count:
-                    current_count = temp_count
-                    last_user_id = temp_user
-
                 if number == current_count + 1 and message.author.id != last_user_id:
                     current_count, last_user_id = number, message.author.id
                     save_counting(current_count, last_user_id) 
                     await message.add_reaction("✅")
                 elif number <= current_count:
+                    # On ignore si c'est un chiffre déjà dit ou plus petit
                     return
                 else:
+                    # Erreur : Reset complet
                     current_count, last_user_id = 0, None
                     save_counting(0, None) 
                     await message.add_reaction("❌")
@@ -324,7 +327,9 @@ async def giveaway(ctx, *, args):
 async def ping(ctx): await ctx.send(f"🏓 Pong ! (**{round(bot.latency * 1000)}ms**)")
 
 @bot.command()
-async def score(ctx): await ctx.send(f"Le score actuel sauvegardé est **{current_count}**.")
+async def score(ctx): 
+    c, u = load_counting()
+    await ctx.send(f"Le score actuel sauvegardé est **{c}**.")
 
 if __name__ == "__main__":
     keep_alive()
