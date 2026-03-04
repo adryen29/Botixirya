@@ -15,10 +15,11 @@ from threading import Thread
 COMMAND_PREFIX = "<aav>"
 COUNTING_CHANNEL_ID = 1478440739095580822
 LOG_CHANNEL_ID = 1478437400496705721
-VERIFY_CHANNEL_ID = 1478669348989177997
-ROLE_UNVERIFIED_ID = 1478658867415089263  # Rôle UNVERRIFIED
-ROLE_VERIFIED_ID = 1477170552950231164    # Rôle une fois vérifié
+VERIFY_CHANNEL_ID = 1478658827682582662
+ROLE_UNVERIFIED_ID = 1478658867415089263
+ROLE_VERIFIED_ID = 1477170552950231164
 GIVEAWAY_FILE = "giveaways.json"
+COUNTING_FILE = "counting.json" # Fichier pour retenir le score
 # ==========================================
 
 app = Flask('')
@@ -50,6 +51,17 @@ def load_giveaway():
         with open(GIVEAWAY_FILE, "r") as f:
             return json.load(f)
     return {}
+
+def save_counting(count, last_user):
+    with open(COUNTING_FILE, "w") as f:
+        json.dump({"count": count, "last_user_id": last_user}, f)
+
+def load_counting():
+    if os.path.exists(COUNTING_FILE):
+        with open(COUNTING_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("count", 0), data.get("last_user_id", None)
+    return 0, None
 
 async def send_log(content):
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -160,12 +172,17 @@ last_user_id = None
 
 @bot.event
 async def on_ready():
+    global current_count, last_user_id
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
+    
+    # Chargement du score sauvegardé
+    current_count, last_user_id = load_counting()
+    
     if not check_giveaways.is_running():
         check_giveaways.start()
-    await send_log(f"✅ **Botixirya** en ligne. Systèmes Auto-role et Vérification actifs.")
-    print(f"Connecté : {bot.user}")
+    await send_log(f"✅ **Botixirya** en ligne. Score de comptage restauré : `{current_count}`.")
+    print(f"Connecté : {bot.user} | Score : {current_count}")
 
 @bot.event
 async def on_member_join(member):
@@ -180,17 +197,22 @@ async def on_member_join(member):
 async def on_message(message):
     global current_count, last_user_id
     if message.author == bot.user: return
+    
+    # Système de comptage persistant
     if message.channel.id == COUNTING_CHANNEL_ID:
         try:
             number = int(message.content.strip())
             if number == current_count + 1 and message.author.id != last_user_id:
                 current_count, last_user_id = number, message.author.id
+                save_counting(current_count, last_user_id) # Sauvegarde immédiate
                 await message.add_reaction("✅")
             else:
                 current_count, last_user_id = 0, None
+                save_counting(0, None) # Réinitialisation du fichier
                 await message.add_reaction("❌")
                 await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
         except ValueError: pass
+        
     await bot.process_commands(message)
 
 # --- Commandes ---
@@ -211,7 +233,7 @@ async def help(ctx):
     ), inline=False)
     embed.add_field(name="🕹️ Divers", value=(
         f"**{COMMAND_PREFIX}ping** : Latence du bot.\n"
-        f"**{COMMAND_PREFIX}score** : Score actuel du comptage."
+        f"**{COMMAND_PREFIX}score** : Score actuel du comptage (sauvegardé)."
     ), inline=False)
     await ctx.send(embed=embed)
 
@@ -279,10 +301,9 @@ async def giveaway(ctx, *, args):
 async def ping(ctx): await ctx.send(f"🏓 Pong ! (**{round(bot.latency * 1000)}ms**)")
 
 @bot.command()
-async def score(ctx): await ctx.send(f"Le score actuel est **{current_count}**.")
+async def score(ctx): await ctx.send(f"Le score actuel sauvegardé est **{current_count}**.")
 
 if __name__ == "__main__":
     keep_alive()
     token = os.getenv('DISCORD_TOKEN')
     if token: bot.run(token)
-
