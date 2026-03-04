@@ -15,7 +15,7 @@ from threading import Thread
 COMMAND_PREFIX = "<aav>"
 COUNTING_CHANNEL_ID = 1478440739095580822
 LOG_CHANNEL_ID = 1478437400496705721
-VERIFY_CHANNEL_ID = 1478658827682582662
+VERIFY_CHANNEL_ID = 1478669348989177997
 ROLE_UNVERIFIED_ID = 1478658867415089263  # Rôle UNVERRIFIED
 ROLE_VERIFIED_ID = 1477170552950231164    # Rôle une fois vérifié
 GIVEAWAY_FILE = "giveaways.json"
@@ -285,3 +285,4 @@ if __name__ == "__main__":
     keep_alive()
     token = os.getenv('DISCORD_TOKEN')
     if token: bot.run(token)
+
