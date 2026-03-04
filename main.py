@@ -15,7 +15,9 @@ from threading import Thread
 COMMAND_PREFIX = "<aav>"
 COUNTING_CHANNEL_ID = 1478440739095580822
 LOG_CHANNEL_ID = 1478437400496705721
-AUTOROLE_ID = 1478658867415089263  # ID du rôle UNVERRIFIED
+VERIFY_CHANNEL_ID = 1478658827682582662
+ROLE_UNVERIFIED_ID = 1478658867415089263  # Rôle UNVERRIFIED
+ROLE_VERIFIED_ID = 1477170552950231164    # Rôle une fois vérifié
 GIVEAWAY_FILE = "giveaways.json"
 # ==========================================
 
@@ -35,7 +37,7 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True # Nécessaire pour l'Auto-role et les Giveaways
+intents.members = True 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 # --- Gestion des données ---
@@ -53,6 +55,29 @@ async def send_log(content):
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if channel:
         await channel.send(content)
+
+# --- Système de Vérification (Bouton) ---
+class VerifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="S'identifier ✅", style=discord.ButtonStyle.success, custom_id="verify_user")
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        verified_role = interaction.guild.get_role(ROLE_VERIFIED_ID)
+        unverified_role = interaction.guild.get_role(ROLE_UNVERIFIED_ID)
+        
+        if verified_role in interaction.user.roles:
+            return await interaction.response.send_message("Tu es déjà vérifié !", ephemeral=True)
+
+        try:
+            await interaction.user.add_roles(verified_role)
+            if unverified_role in interaction.user.roles:
+                await interaction.user.remove_roles(unverified_role)
+            
+            await interaction.response.send_message("Vérification réussie ! Bienvenue.", ephemeral=True)
+            await send_log(f"✅ **Vérification** : {interaction.user.mention} a passé la vérification.")
+        except:
+            await interaction.response.send_message("Erreur : Vérifiez la hiérarchie de mes rôles.", ephemeral=True)
 
 # --- Interface Giveaway ---
 class GiveawayView(discord.ui.View):
@@ -136,23 +161,20 @@ last_user_id = None
 @bot.event
 async def on_ready():
     bot.add_view(GiveawayView(bot))
+    bot.add_view(VerifyView())
     if not check_giveaways.is_running():
         check_giveaways.start()
-    await send_log(f"✅ **Botixirya** en ligne. Auto-role activé.")
+    await send_log(f"✅ **Botixirya** en ligne. Systèmes Auto-role et Vérification actifs.")
     print(f"Connecté : {bot.user}")
 
 @bot.event
 async def on_member_join(member):
-    """Système Auto-role : Attribue le rôle UNVERRIFIED aux nouveaux membres"""
-    role = member.guild.get_role(AUTOROLE_ID)
+    role = member.guild.get_role(ROLE_UNVERIFIED_ID)
     if role:
         try:
             await member.add_roles(role)
             await send_log(f"👤 **Auto-role** : {member.mention} a reçu le rôle `{role.name}`.")
-        except Exception as e:
-            await send_log(f"⚠️ **Erreur Auto-role** : Impossible de donner le rôle à {member.mention}. (Vérifiez la hiérarchie des rôles)")
-    else:
-        await send_log(f"⚠️ **Erreur Auto-role** : Rôle ID `{AUTOROLE_ID}` introuvable.")
+        except: pass
 
 @bot.event
 async def on_message(message):
@@ -180,7 +202,8 @@ async def help(ctx):
     embed.add_field(name="🛡️ Modération (Admin)", value=(
         f"**{COMMAND_PREFIX}lock** : Verrouille le salon.\n"
         f"**{COMMAND_PREFIX}unlock** : Déverrouille le salon.\n"
-        f"**{COMMAND_PREFIX}restore** : Nettoie le salon actuel."
+        f"**{COMMAND_PREFIX}restore** : Nettoie le salon actuel.\n"
+        f"**{COMMAND_PREFIX}setup_verify** : Installe le bouton de vérification."
     ), inline=False)
     embed.add_field(name="🎁 Giveaways (Admin)", value=(
         f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [récompense] [condition]**\n"
@@ -191,6 +214,20 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}score** : Score actuel du comptage."
     ), inline=False)
     await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setup_verify(ctx):
+    """Installe le message de vérification dans le salon de vérification"""
+    channel = bot.get_channel(VERIFY_CHANNEL_ID)
+    if not channel: return await ctx.send("Salon de vérification introuvable.")
+    embed = discord.Embed(
+        title="🛡️ Vérification Sécurisée",
+        description="Clique sur le bouton ci-dessous pour accéder au serveur et obtenir tes accès.",
+        color=discord.Color.green()
+    )
+    await channel.send(embed=embed, view=VerifyView())
+    await ctx.send("✅ Système de vérification installé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -218,12 +255,11 @@ async def giveaway(ctx, *, args):
     matches = re.findall(r'\[(.*?)\]', args)
     if len(matches) < 4:
         return await ctx.send(f"❌ Format : `{COMMAND_PREFIX}giveaway [minutes] [gagnants] [récompense] [condition]`")
-
     try:
         minutes, winners = int(matches[0]), int(matches[1])
         prize, req = matches[2], matches[3]
     except ValueError:
-        return await ctx.send("❌ Minutes et gagnants doivent être des nombres.")
+        return await ctx.send("❌ Erreur : Minutes et gagnants doivent être des chiffres.")
 
     end_time = time.time() + (minutes * 60)
     embed = discord.Embed(title="🎉 GIVEAWAY 🎉", color=discord.Color.gold())
