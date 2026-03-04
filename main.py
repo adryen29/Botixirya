@@ -17,10 +17,13 @@ LOG_CHANNEL_ID = 1478437400496705721
 GIVEAWAY_FILE = "giveaways.json"
 # ==========================================
 
-# --- Serveur Web pour Koyeb ---
+# --- Serveur Web pour éviter la mise en veille ---
 app = Flask('')
+
 @app.route('/')
-def home(): return "Botixirya est en ligne !"
+def home():
+    # Cette page est celle que Cron-job.org doit visiter
+    return "Botixirya Status: OK - Système Anti-Mise en Veille Actif"
 
 def run():
     port = int(os.environ.get("PORT", 8000))
@@ -36,18 +39,24 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
-# --- Système de Persistence ---
+# --- Système de Persistence (Lecture/Écriture) ---
 def save_giveaway(data):
-    with open(GIVEAWAY_FILE, "w") as f:
-        json.dump(data, f)
+    try:
+        with open(GIVEAWAY_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Erreur sauvegarde : {e}")
 
 def load_giveaway():
     if os.path.exists(GIVEAWAY_FILE):
-        with open(GIVEAWAY_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(GIVEAWAY_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
-# --- Vues et Tâches ---
+# --- Vues et Gestion des Boutons ---
 class GiveawayView(discord.ui.View):
     def __init__(self, bot):
         super().__init__(timeout=None)
@@ -96,7 +105,7 @@ async def check_giveaways():
                         embed = message.embeds[0]
                         embed.description = f"Terminé !\nGagnant(s) : {mentions}"
                         embed.color = discord.Color.black()
-                        await message.edit(embed=embed)
+                        await message.edit(embed=embed, view=None) # Retire le bouton participer
                         await channel.send(f"🎉 Félicitations {mentions} ! Vous gagnez : **{gw['prize']}** !")
                 except: pass
             gw['ended'] = True
@@ -111,9 +120,7 @@ async def on_ready():
     bot.add_view(GiveawayView(bot))
     if not check_giveaways.is_running():
         check_giveaways.start()
-    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        await log_channel.send(f"✅ **Botixirya** en ligne. Préfixe : `{COMMAND_PREFIX}`")
+    print(f"Connecté en tant que {bot.user}")
 
 @bot.event
 async def on_message(message):
@@ -137,24 +144,20 @@ async def on_message(message):
 @bot.command()
 async def help(ctx):
     """Affiche la liste des commandes disponibles"""
-    embed = discord.Embed(title="📜 Aide du Bot Botixirya", color=discord.Color.blue(), description=f"Préfixe : `{COMMAND_PREFIX}`")
-    
+    embed = discord.Embed(title="📜 Aide du Bot Botixirya", color=discord.Color.blue())
     embed.add_field(name="🛡️ Modération (Admin)", value=(
         f"**{COMMAND_PREFIX}lock** : Verrouille le salon.\n"
         f"**{COMMAND_PREFIX}unlock** : Déverrouille le salon.\n"
-        f"**{COMMAND_PREFIX}restore** : Recrée le salon à neuf."
+        f"**{COMMAND_PREFIX}restore** : Recrée le salon à neuf pour effacer l'historique."
     ), inline=False)
-    
     embed.add_field(name="🎁 Giveaways (Admin)", value=(
-        f"**{COMMAND_PREFIX}giveaway [minutes] [gagnants] [récompense] [condition]** : Lance un concours.\n"
-        f"*Note: Le temps est en minutes.*"
+        f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [récompense] [condition]** : Lance un concours (temps en minutes).\n"
+        f"Les admins peuvent reroll via le bouton sous le message."
     ), inline=False)
-    
     embed.add_field(name="🕹️ Divers", value=(
         f"**{COMMAND_PREFIX}ping** : Latence du bot.\n"
-        f"**{COMMAND_PREFIX}score** : Score actuel du comptage."
+        f"**{COMMAND_PREFIX}score** : Score actuel du salon de comptage."
     ), inline=False)
-    
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -183,8 +186,7 @@ async def giveaway(ctx, minutes: int, winners: int, prize: str, *, req: str = "A
     end_time = time.time() + (minutes * 60)
     embed = discord.Embed(title="🎉 GIVEAWAY 🎉", color=discord.Color.gold())
     embed.add_field(name="Récompense", value=prize, inline=False)
-    embed.add_field(name="Fin dans", value=f"<t:{int(end_time)}:R>", inline=True)
-    embed.add_field(name="Gagnants", value=str(winners), inline=True)
+    embed.add_field(name="Fin", value=f"<t:{int(end_time)}:R>", inline=True)
     embed.add_field(name="Condition", value=req, inline=False)
     
     msg = await ctx.send(embed=embed, view=GiveawayView(bot))
@@ -196,7 +198,7 @@ async def giveaway(ctx, minutes: int, winners: int, prize: str, *, req: str = "A
 async def ping(ctx): await ctx.send(f"🏓 Pong ! (**{round(bot.latency * 1000)}ms**)")
 
 @bot.command()
-async def score(ctx): await ctx.send(f"Le score actuel est **{current_count}**.")
+async def score(ctx): await ctx.send(f"Score actuel : **{current_count}**.")
 
 # --- Lancement ---
 if __name__ == "__main__":
