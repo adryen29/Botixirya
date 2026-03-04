@@ -6,6 +6,8 @@ import asyncio
 import time
 import random
 import re
+from flask import Flask
+from threading import Thread
 
 # ==========================================
 # VARIABLES MODIFIABLES (VISIBLES)
@@ -20,12 +22,29 @@ GIVEAWAY_FILE = "giveaways.json"
 COUNTING_FILE = "counting.json"
 # ==========================================
 
+# --- Mini Serveur Flask pour Koyeb (Port 8000) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Botixirya Online"
+
+def run_flask():
+    # Koyeb utilise par défaut le port 8000 pour les health checks
+    app.run(host='0.0.0.0', port=8000)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+# --- Configuration du Bot ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
-# --- Systèmes de Sauvegarde JSON ---
+# --- Fonctions de Persistance ---
 def save_data(file, data):
     with open(file, "w") as f:
         json.dump(data, f)
@@ -57,13 +76,13 @@ class VerifyView(discord.ui.View):
             if un_role in interaction.user.roles:
                 await interaction.user.remove_roles(un_role)
             
-            await interaction.response.send_message("Vérification réussie ! Bienvenue.", ephemeral=True)
+            await interaction.response.send_message("Vérification réussie !", ephemeral=True)
             
             log_chan = bot.get_channel(LOG_CHANNEL_ID)
             if log_chan:
                 await log_chan.send(f"✅ **Vérification** : {interaction.user.mention} a réussi la vérification.")
         except:
-            await interaction.response.send_message("❌ Erreur : Mes permissions sont insuffisantes.", ephemeral=True)
+            await interaction.response.send_message("❌ Erreur de permissions du bot.", ephemeral=True)
 
 class GiveawayView(discord.ui.View):
     def __init__(self):
@@ -75,9 +94,9 @@ class GiveawayView(discord.ui.View):
         gid = str(interaction.message.id)
         
         if gid not in data or data[gid]['ended']:
-            return await interaction.response.send_message("Concours terminé.", ephemeral=True)
+            return await interaction.response.send_message("Ce concours est terminé.", ephemeral=True)
         if interaction.user.id in data[gid]['participants']:
-            return await interaction.response.send_message("Déjà inscrit !", ephemeral=True)
+            return await interaction.response.send_message("Tu es déjà inscrit !", ephemeral=True)
         
         data[gid]['participants'].append(interaction.user.id)
         save_data(GIVEAWAY_FILE, data)
@@ -96,11 +115,11 @@ async def check_giveaways():
                     msg = await chan.fetch_message(int(mid))
                     pts = gw['participants']
                     if len(pts) < gw['winners_count']:
-                        await chan.send(f"⚠️ Pas assez de monde pour **{gw['prize']}**.")
+                        await chan.send(f"⚠️ Pas assez de participants pour **{gw['prize']}**.")
                     else:
                         winners = random.sample(pts, gw['winners_count'])
                         mentions = ", ".join([f"<@{w}>" for w in winners])
-                        await chan.send(f"🎊 Félicitations {mentions} ! Tu gagnes : **{gw['prize']}** !")
+                        await chan.send(f"🎊 Félicitations {mentions} ! Vous gagnez : **{gw['prize']}** !")
                 except: pass
             gw['ended'] = True
             save_data(GIVEAWAY_FILE, data)
@@ -121,7 +140,7 @@ async def on_ready():
     
     if not check_giveaways.is_running():
         check_giveaways.start()
-    print(f"✅ Connecté : {bot.user} | Score : {current_count}")
+    print(f"✅ Botixirya Connecté : {bot.user} | Score restauré : {current_count}")
 
 @bot.event
 async def on_member_join(member):
@@ -170,7 +189,7 @@ async def setup_verify(ctx):
 async def giveaway(ctx, *, args):
     """Lance un concours : [min] [gagnants] [prix] [condition]"""
     m = re.findall(r'\[(.*?)\]', args)
-    if len(m) < 4: return await ctx.send("Usage: [min] [gagnants] [prix] [cond]")
+    if len(m) < 4: return await ctx.send(f"Usage: `{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]`")
     
     mins, wins, prize, cond = int(m[0]), int(m[1]), m[2], m[3]
     end = time.time() + (mins * 60)
@@ -191,10 +210,10 @@ async def score(ctx):
 
 @bot.command()
 async def help(ctx):
-    """Affiche l'aide du bot"""
+    """Affiche l'aide complète du bot"""
     embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
     embed.add_field(name="🛡️ Admin", value=f"`{COMMAND_PREFIX}setup_verify`, `{COMMAND_PREFIX}giveaway`", inline=False)
-    embed.add_field(name="🕹️ Divers", value=f"`{COMMAND_PREFIX}score`, `{COMMAND_PREFIX}ping`", inline=False)
+    embed.add_field(name="🎮 Général", value=f"`{COMMAND_PREFIX}score`, `{COMMAND_PREFIX}ping`", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -203,5 +222,8 @@ async def ping(ctx):
     await ctx.send(f"🏓 Pong ! `{round(bot.latency * 1000)}ms` ")
 
 # --- Lancement ---
-token = os.getenv('DISCORD_TOKEN')
-if token: bot.run(token)
+if __name__ == "__main__":
+    keep_alive() # Lance Flask sur le port 8000 pour Koyeb
+    token = os.getenv('DISCORD_TOKEN')
+    if token:
+        bot.run(token)
