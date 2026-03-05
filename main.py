@@ -13,7 +13,7 @@ from threading import Thread
 # VARIABLES MODIFIABLES (VISIBLES)
 # ==========================================
 COMMAND_PREFIX = "<aav>"
-COUNTING_CHANNEL_ID = 1478829146799997240
+COUNTING_CHANNEL_ID = 1479057737395605546
 LOG_CHANNEL_ID = 1478437400496705721
 VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
@@ -336,3 +336,4 @@ if __name__ == "__main__":
     keep_alive()
     token = os.getenv('DISCORD_TOKEN')
     if token: bot.run(token)
+
