@@ -38,6 +38,8 @@ def keep_alive():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True 
+
+# Désactivation explicite de la commande help par défaut pour éviter les doublons
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 # --- Gestion des données ---
@@ -212,7 +214,6 @@ async def on_message(message):
     
     # Vérification dynamique du salon de comptage
     if message.channel.id == active_counting_channel:
-        # Rafraîchir les données depuis le fichier pour éviter les décalages
         current_count, last_user_id, active_counting_channel = load_counting()
         
         content = message.content.strip()
@@ -232,9 +233,10 @@ async def on_message(message):
                 save_counting(0, None) 
                 await message.add_reaction("❌")
                 await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
-        
-    # APPEL UNIQUE POUR LES COMMANDES (Anti-Double)
-    await bot.process_commands(message)
+    
+    # Appel des commandes uniquement si le message commence par le préfixe
+    if message.content.startswith(COMMAND_PREFIX):
+        await bot.process_commands(message)
 
 # --- Commandes ---
 
