@@ -6,6 +6,7 @@ import asyncio
 import time
 import random
 import re
+import sys  # Variable visible : nécessaire pour la commande kill
 from flask import Flask
 from threading import Thread
 
@@ -258,9 +259,19 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon actuel comme salon de comptage officiel (Admin)."
     ), inline=False)
     embed.add_field(name="📊 Système", value=(
-        f"**{COMMAND_PREFIX}ping** : Affiche la latence actuelle du bot."
+        f"**{COMMAND_PREFIX}ping** : Affiche la latence actuelle du bot.\n"
+        f"**{COMMAND_PREFIX}kill** : Arrête complètement le processus du bot (Admin)."
     ), inline=False)
     await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def kill(ctx):
+    """Arrête complètement le processus du bot (Koyeb le relancera automatiquement)."""
+    await ctx.send("💀 Arrêt du processus en cours...")
+    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}.")
+    await bot.close()
+    sys.exit()
 
 @bot.command()
 @commands.has_permissions(administrator=True)
