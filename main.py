@@ -56,8 +56,7 @@ def load_giveaway():
     return {}
 
 def save_counting(count, last_user, channel_id=None):
-    """Sauvegarde le score, le dernier utilisateur et l'ID du salon de comptage."""
-    # On charge l'existant pour ne pas perdre le channel_id si on ne le précise pas
+    """Sauvegarde le score, le dernier utilisateur et l'ID du salon avec forçage d'écriture."""
     data = {"count": count, "last_user_id": last_user, "channel_id": channel_id}
     if channel_id is None:
         old_count, old_user, old_chan = load_counting()
@@ -65,6 +64,8 @@ def save_counting(count, last_user, channel_id=None):
 
     with open(COUNTING_FILE, "w") as f:
         json.dump(data, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno()) # Force l'écriture physique sur le disque
 
 def load_counting():
     """Charge les données de comptage et l'ID du salon."""
@@ -269,12 +270,16 @@ async def help(ctx):
 async def kill(ctx):
     """Sauvegarde le score et le salon actuel, puis arrête le processus du bot."""
     global current_count, last_user_id, active_counting_channel
-    await ctx.send("💀 Sauvegarde du score et du salon... Arrêt du bot.")
+    await ctx.send("💀 Sauvegarde forcée des données... Arrêt imminent.")
     
-    # Force la sauvegarde du score, de l'utilisateur et du salon avant l'arrêt
+    # Force la sauvegarde immédiate
     save_counting(current_count, last_user_id, active_counting_channel)
     
-    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}. État sauvegardé.")
+    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}. État sauvegardé sur disque.")
+    
+    # Petit délai pour garantir que l'OS a fini l'écriture avant de tuer Python
+    await asyncio.sleep(1)
+    
     await bot.close()
     sys.exit()
 
