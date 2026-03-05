@@ -267,9 +267,14 @@ async def help(ctx):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def kill(ctx):
-    """Arrête complètement le processus du bot (Koyeb le relancera automatiquement)."""
-    await ctx.send("💀 Arrêt du processus en cours...")
-    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}.")
+    """Sauvegarde les données actuelles puis arrête le processus du bot."""
+    global current_count, last_user_id, active_counting_channel
+    await ctx.send("💀 Sauvegarde des données et arrêt du processus...")
+    
+    # On force la sauvegarde du score et du channel actuel avant de quitter
+    save_counting(current_count, last_user_id, active_counting_channel)
+    
+    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}. Données sauvegardées.")
     await bot.close()
     sys.exit()
 
