@@ -15,19 +15,19 @@ from threading import Thread
 # ==========================================
 COMMAND_PREFIX = "<aav>"
 LOG_CHANNEL_ID = 1478437400496705721
+DB_CHANNEL_ID = 1479105188454338611 # Salon Discord servant de base de données
 VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
 ROLE_VERIFIED_ID = 1477170552950231164
 GIVEAWAY_FILE = "giveaways.json"
 COUNTING_FILE = "counting.json"
-# Note: COUNTING_CHANNEL_ID est maintenant géré dynamiquement via le fichier JSON
 # ==========================================
 
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Botixirya Status: OK - Système Anti-Mise en Veille Actif"
+    return "Botixirya Status: OK"
 
 def run():
     port = int(os.environ.get("PORT", 8000))
@@ -56,25 +56,22 @@ def load_giveaway():
     return {}
 
 def save_counting(count, last_user, channel_id=None):
-    """Sauvegarde le score, le dernier utilisateur et l'ID du salon avec forçage d'écriture."""
+    """Sauvegarde locale (éphémère)"""
     data = {"count": count, "last_user_id": last_user, "channel_id": channel_id}
     if channel_id is None:
-        old_count, old_user, old_chan = load_counting()
+        _, _, old_chan = load_counting()
         data["channel_id"] = old_chan
-
     with open(COUNTING_FILE, "w") as f:
         json.dump(data, f, indent=4)
-        f.flush()
-        os.fsync(f.fileno()) # Force l'écriture physique sur le disque
 
 def load_counting():
-    """Charge les données de comptage et l'ID du salon."""
+    """Charge les données du fichier local"""
     if os.path.exists(COUNTING_FILE):
         try:
             with open(COUNTING_FILE, "r") as f:
                 data = json.load(f)
                 return int(data.get("count", 0)), data.get("last_user_id", None), data.get("channel_id", 0)
-        except (json.JSONDecodeError, KeyError, ValueError):
+        except:
             return 0, None, 0
     return 0, None, 0
 
@@ -83,7 +80,7 @@ async def send_log(content):
     if channel:
         await channel.send(content)
 
-# --- Système de Vérification (Bouton) ---
+# --- Système de Vérification ---
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -92,19 +89,16 @@ class VerifyView(discord.ui.View):
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         verified_role = interaction.guild.get_role(ROLE_VERIFIED_ID)
         unverified_role = interaction.guild.get_role(ROLE_UNVERIFIED_ID)
-        
         if verified_role in interaction.user.roles:
             return await interaction.response.send_message("Tu es déjà vérifié !", ephemeral=True)
-
         try:
             await interaction.user.add_roles(verified_role)
             if unverified_role in interaction.user.roles:
                 await interaction.user.remove_roles(unverified_role)
-            
-            await interaction.response.send_message("Vérification réussie ! Bienvenue.", ephemeral=True)
-            await send_log(f"✅ **Vérification** : {interaction.user.mention} a passé la vérification.")
+            await interaction.response.send_message("Vérification réussie !", ephemeral=True)
+            await send_log(f"✅ **Vérification** : {interaction.user.mention}")
         except:
-            await interaction.response.send_message("Erreur : Vérifiez la hiérarchie de mes rôles.", ephemeral=True)
+            await interaction.response.send_message("Erreur de rôle.", ephemeral=True)
 
 # --- Interface Giveaway ---
 class GiveawayView(discord.ui.View):
@@ -117,42 +111,27 @@ class GiveawayView(discord.ui.View):
         data = load_giveaway()
         gw_id = str(interaction.message.id)
         if gw_id not in data or data[gw_id]['ended']:
-            return await interaction.response.send_message("Ce concours est terminé.", ephemeral=True)
+            return await interaction.response.send_message("Terminé.", ephemeral=True)
         if interaction.user.id in data[gw_id]['participants']:
-            return await interaction.response.send_message("Tu participes déjà !", ephemeral=True)
-        
+            return await interaction.response.send_message("Déjà inscrit !", ephemeral=True)
         data[gw_id]['participants'].append(interaction.user.id)
         save_giveaway(data)
-        await interaction.response.send_message("Ta participation a été enregistrée !", ephemeral=True)
+        await interaction.response.send_message("Inscrit !", ephemeral=True)
 
     @discord.ui.button(label="Reroll 🎲", style=discord.ButtonStyle.gray, custom_id="reroll_gw")
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("Admin uniquement.", ephemeral=True)
-        
+        if not interaction.user.guild_permissions.administrator: return
         data = load_giveaway()
         gw_id = str(interaction.message.id)
-        if gw_id not in data or not data[gw_id]['participants']:
-            return await interaction.response.send_message("Pas assez de participants.", ephemeral=True)
-        
-        winner_id = random.choice(data[gw_id]['participants'])
-        await interaction.channel.send(f"🎲 **Reroll :** Le nouveau gagnant est <@{winner_id}> !")
-        await send_log(f"🎲 **Reroll** : {interaction.user.mention} a relancé le tirage du giveaway `{gw_id}`.")
-        await interaction.response.send_message("Reroll effectué.", ephemeral=True)
+        if gw_id in data and data[gw_id]['participants']:
+            winner = random.choice(data[gw_id]['participants'])
+            await interaction.channel.send(f"🎲 Nouveau gagnant : <@{winner}>")
+            await interaction.response.send_message("Fait.", ephemeral=True)
 
     @discord.ui.button(label="Annuler ❌", style=discord.ButtonStyle.danger, custom_id="delete_gw")
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("Admin uniquement.", ephemeral=True)
-        
-        data = load_giveaway()
-        gw_id = str(interaction.message.id)
-        if gw_id in data:
-            del data[gw_id]
-            save_giveaway(data)
-        
+        if not interaction.user.guild_permissions.administrator: return
         await interaction.message.delete()
-        await send_log(f"🗑️ **Suppression** : {interaction.user.mention} a annulé le giveaway `{gw_id}`.")
 
 @tasks.loop(seconds=30)
 async def check_giveaways():
@@ -160,22 +139,6 @@ async def check_giveaways():
     now = time.time()
     for msg_id, gw in list(data.items()):
         if not gw['ended'] and now >= gw['end_time']:
-            channel = bot.get_channel(gw['channel_id'])
-            if channel:
-                try:
-                    message = await channel.fetch_message(int(msg_id))
-                    participants = gw['participants']
-                    if len(participants) < gw['winners_count']:
-                        await channel.send(f"Fin : Pas assez de participants pour **{gw['prize']}**.")
-                    else:
-                        winners = random.sample(participants, gw['winners_count'])
-                        mentions = ", ".join([f"<@{w}>" for w in winners])
-                        embed = message.embeds[0]
-                        embed.description = f"Terminé !\nGagnant(s) : {mentions}"
-                        embed.color = discord.Color.black()
-                        await message.edit(embed=embed, view=None)
-                        await channel.send(f"🎉 Félicitations {mentions} ! Vous gagnez : **{gw['prize']}** !")
-                except: pass
             gw['ended'] = True
             save_giveaway(data)
 
@@ -190,51 +153,47 @@ async def on_ready():
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
     
-    # CHARGEMENT ET RÉCUPÉRATION DU SCORE ET DU CHANNEL
-    current_count, last_user_id, active_counting_channel = load_counting()
+    # Tentative de restauration depuis le salon DB (Priorité)
+    db_chan = bot.get_channel(DB_CHANNEL_ID)
+    if db_chan:
+        async for message in db_chan.history(limit=10):
+            if "BACKUP_COUNT|" in message.content:
+                parts = message.content.split("|")
+                current_count = int(parts[1])
+                last_user_id = int(parts[2]) if parts[2] != "None" else None
+                active_counting_channel = int(parts[3])
+                break
+    else:
+        # Repli sur le fichier local si le salon n'est pas accessible
+        current_count, last_user_id, active_counting_channel = load_counting()
     
     if not check_giveaways.is_running():
         check_giveaways.start()
     
-    msg = f"✅ **Botixirya** en ligne. Score : `{current_count}`, Salon de compte : `{active_counting_channel}`."
-    await send_log(msg)
-    print(f"Prêt | Score actuel : {current_count} | Channel : {active_counting_channel}")
-
-@bot.event
-async def on_member_join(member):
-    role = member.guild.get_role(ROLE_UNVERIFIED_ID)
-    if role:
-        try:
-            await member.add_roles(role)
-            await send_log(f"👤 **Auto-role** : {member.mention} a reçu le rôle `{role.name}`.")
-        except: pass
+    await send_log(f"✅ **Botixirya** prêt. Score actuel : `{current_count}`")
 
 @bot.event
 async def on_message(message):
     global current_count, last_user_id, active_counting_channel
     if message.author == bot.user: return
     
-    # Vérification dynamique du salon de comptage
     if message.channel.id == active_counting_channel:
-        current_count, last_user_id, active_counting_channel = load_counting()
-        
         content = message.content.strip()
         if content.isdigit():
             number = int(content)
-            
             if number == current_count + 1 and message.author.id != last_user_id:
                 current_count = number
                 last_user_id = message.author.id
-                save_counting(current_count, last_user_id) 
+                save_counting(current_count, last_user_id)
                 await message.add_reaction("✅")
             elif number <= current_count:
                 return
             else:
                 current_count = 0
                 last_user_id = None
-                save_counting(0, None) 
+                save_counting(0, None)
                 await message.add_reaction("❌")
-                await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
+                await message.channel.send("⚠️ Suite cassée ! Retour à 1.")
         
     await bot.process_commands(message)
 
@@ -242,130 +201,112 @@ async def on_message(message):
 
 @bot.command()
 async def help(ctx):
-    """Affiche la liste complète des commandes utilisables avec le préfixe <aav>."""
+    """Affiche la liste des commandes disponibles."""
     embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
-    embed.add_field(name="🛡️ Modération (Admin)", value=(
-        f"**{COMMAND_PREFIX}lock** : Verrouille l'envoi de messages dans le salon actuel.\n"
-        f"**{COMMAND_PREFIX}unlock** : Déverrouille l'envoi de messages dans le salon actuel.\n"
-        f"**{COMMAND_PREFIX}restore** : Recrée le salon à neuf pour effacer les messages.\n"
-        f"**{COMMAND_PREFIX}setup_verify** : Installe le bouton de vérification dans le salon configuré."
+    embed.add_field(name="🛡️ Système", value=(
+        f"**{COMMAND_PREFIX}kill** : Sauvegarde les données dans le salon DB et s'éteint.\n"
+        f"**{COMMAND_PREFIX}ping** : Affiche la latence du bot.\n"
+        f"**{COMMAND_PREFIX}score** : Affiche le score actuel."
     ), inline=False)
-    embed.add_field(name="🎁 Giveaways (Admin)", value=(
-        f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**\n"
-        f"Lance un concours automatique avec boutons de participation."
+    embed.add_field(name="⚙️ Admin", value=(
+        f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon de comptage actuel.\n"
+        f"**{COMMAND_PREFIX}setscore [nb]** : Modifie manuellement le score.\n"
+        f"**{COMMAND_PREFIX}lock / unlock** : Verrouille ou déverrouille le salon.\n"
+        f"**{COMMAND_PREFIX}restore** : Recrée le salon actuel."
     ), inline=False)
-    embed.add_field(name="🕹️ Gestion du Comptage", value=(
-        f"**{COMMAND_PREFIX}score** : Affiche le nombre actuel sauvegardé.\n"
-        f"**{COMMAND_PREFIX}setscore [nombre]** : Définit manuellement la valeur du compteur (Admin).\n"
-        f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon actuel comme salon de comptage officiel (Admin)."
-    ), inline=False)
-    embed.add_field(name="📊 Système", value=(
-        f"**{COMMAND_PREFIX}ping** : Affiche la latence actuelle du bot.\n"
-        f"**{COMMAND_PREFIX}kill** : Sauvegarde les données et arrête le processus (Admin)."
-    ), inline=False)
+    embed.add_field(name="🎁 Giveaway", value=f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def kill(ctx):
-    """Sauvegarde le score et le salon actuel, puis arrête le processus du bot."""
+    """Envoie une sauvegarde dans le salon DB et ferme le bot."""
     global current_count, last_user_id, active_counting_channel
-    await ctx.send("💀 Sauvegarde forcée des données... Arrêt imminent.")
     
-    # Force la sauvegarde immédiate
+    db_chan = bot.get_channel(DB_CHANNEL_ID)
+    if db_chan:
+        await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
+    
     save_counting(current_count, last_user_id, active_counting_channel)
-    
-    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}. État sauvegardé sur disque.")
-    
-    # Petit délai pour garantir que l'OS a fini l'écriture avant de tuer Python
-    await asyncio.sleep(1)
-    
+    await ctx.send("💀 Données sauvegardées dans le salon DB. Extinction...")
+    await asyncio.sleep(2)
     await bot.close()
     sys.exit()
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setcountchannel(ctx):
-    """Définit le salon où la commande est tapée comme le salon actif pour le jeu du comptage."""
+    """Définit ce salon pour le comptage."""
     global active_counting_channel
     active_counting_channel = ctx.channel.id
-    c, u, _ = load_counting()
-    save_counting(c, u, active_counting_channel)
-    await ctx.send(f"✅ Ce salon est désormais le salon de comptage officiel.")
-    await send_log(f"⚙️ **Configuration** : {ctx.author.mention} a défini {ctx.channel.mention} pour le comptage.")
+    save_counting(current_count, last_user_id, active_counting_channel)
+    
+    db_chan = bot.get_channel(DB_CHANNEL_ID)
+    if db_chan:
+        await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
+        
+    await ctx.send("✅ Salon de comptage défini.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setscore(ctx, number: int):
-    """Permet de modifier manuellement le score de comptage stocké dans le fichier JSON."""
+    """Définit le score manuellement."""
     global current_count, last_user_id
     current_count = number
     last_user_id = None
     save_counting(current_count, last_user_id)
-    await ctx.send(f"✅ Le score a été forcé à : **{number}**.")
-    await send_log(f"⚙️ **Admin** : {ctx.author.mention} a changé le score à `{number}`.")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def setup_verify(ctx):
-    """Envoie le module de vérification interactif pour les nouveaux membres."""
-    channel = bot.get_channel(VERIFY_CHANNEL_ID)
-    if not channel: return await ctx.send("Salon introuvable.")
-    embed = discord.Embed(title="🛡️ Vérification", description="Cliquez pour accéder au reste du serveur.", color=discord.Color.green())
-    await channel.send(embed=embed, view=VerifyView())
-    await ctx.send("✅ Système installé.")
+    
+    db_chan = bot.get_channel(DB_CHANNEL_ID)
+    if db_chan:
+        await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
+        
+    await ctx.send(f"✅ Score fixé à {number}.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def lock(ctx):
-    """Désactive l'autorisation de parler pour @everyone dans ce salon."""
+    """Verrouille l'envoi de messages dans le salon."""
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
     await ctx.send("🔒 Salon verrouillé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def unlock(ctx):
-    """Réactive l'autorisation de parler pour @everyone dans ce salon."""
+    """Déverrouille l'envoi de messages dans le salon."""
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.send("🔓 Salon déverrouillé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def restore(ctx):
-    """Clone et supprime le salon actuel pour un nettoyage total."""
+    """Clone et supprime le salon actuel."""
     new = await ctx.channel.clone()
-    await new.edit(position=ctx.channel.position)
     await ctx.channel.delete()
     await new.send("✨ Salon restauré.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def giveaway(ctx, *, args):
-    """Crée un giveaway. Format : [temps] [gagnants] [récompense] [condition]"""
+    """Lance un giveaway. Format : [min] [gagnants] [prix] [condition]"""
     m = re.findall(r'\[(.*?)\]', args)
-    if len(m) < 4: return await ctx.send("Format invalide.")
-    
+    if len(m) < 4: return
     end = time.time() + (int(m[0]) * 60)
     embed = discord.Embed(title="🎉 GIVEAWAY", color=discord.Color.gold())
-    embed.add_field(name="Récompense", value=m[2], inline=False)
-    embed.add_field(name="Gagnants", value=m[1], inline=True)
-    embed.add_field(name="Fin", value=f"<t:{int(end)}:R>", inline=True)
-    
+    embed.add_field(name="Prix", value=m[2])
     msg = await ctx.send(embed=embed, view=GiveawayView(bot))
     data = load_giveaway()
     data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": m[2], "winners_count": int(m[1]), "end_time": end, "participants": [], "ended": False}
     save_giveaway(data)
 
 @bot.command()
-async def ping(ctx): 
-    """Répond avec la latence du bot en millisecondes."""
-    await ctx.send(f"🏓 Pong ! (**{round(bot.latency * 1000)}ms**)")
+async def ping(ctx):
+    """Affiche la latence."""
+    await ctx.send(f"🏓 {round(bot.latency * 1000)}ms")
 
 @bot.command()
-async def score(ctx): 
-    """Affiche le score actuel de la liste de comptage."""
-    c, _, _ = load_counting()
-    await ctx.send(f"Score actuel : **{c}**.")
+async def score(ctx):
+    """Affiche le score actuel."""
+    await ctx.send(f"Score actuel : **{current_count}**")
 
 if __name__ == "__main__":
     keep_alive()
