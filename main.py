@@ -39,7 +39,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True 
 
-# Désactivation explicite de la commande help par défaut pour éviter les doublons
+# Suppression de l'aide par défaut pour éviter les doublons
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 # --- Gestion des données ---
@@ -234,7 +234,7 @@ async def on_message(message):
                 await message.add_reaction("❌")
                 await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
     
-    # Appel des commandes uniquement si le message commence par le préfixe
+    # Filtrage strict pour éviter les doublons de commandes
     if message.content.startswith(COMMAND_PREFIX):
         await bot.process_commands(message)
 
