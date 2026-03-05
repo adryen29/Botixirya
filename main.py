@@ -260,21 +260,21 @@ async def help(ctx):
     ), inline=False)
     embed.add_field(name="📊 Système", value=(
         f"**{COMMAND_PREFIX}ping** : Affiche la latence actuelle du bot.\n"
-        f"**{COMMAND_PREFIX}kill** : Arrête complètement le processus du bot (Admin)."
+        f"**{COMMAND_PREFIX}kill** : Sauvegarde les données et arrête le processus (Admin)."
     ), inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def kill(ctx):
-    """Sauvegarde les données actuelles puis arrête le processus du bot."""
+    """Sauvegarde le score et le salon actuel, puis arrête le processus du bot."""
     global current_count, last_user_id, active_counting_channel
-    await ctx.send("💀 Sauvegarde des données et arrêt du processus...")
+    await ctx.send("💀 Sauvegarde du score et du salon... Arrêt du bot.")
     
-    # On force la sauvegarde du score et du channel actuel avant de quitter
+    # Force la sauvegarde du score, de l'utilisateur et du salon avant l'arrêt
     save_counting(current_count, last_user_id, active_counting_channel)
     
-    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}. Données sauvegardées.")
+    await send_log(f"⚠️ **Système** : Le bot a été tué par {ctx.author.mention}. État sauvegardé.")
     await bot.close()
     sys.exit()
 
