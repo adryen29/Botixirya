@@ -13,13 +13,13 @@ from threading import Thread
 # VARIABLES MODIFIABLES (VISIBLES)
 # ==========================================
 COMMAND_PREFIX = "<aav>"
-COUNTING_CHANNEL_ID = 1479057737395605546
 LOG_CHANNEL_ID = 1478437400496705721
 VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
 ROLE_VERIFIED_ID = 1477170552950231164
 GIVEAWAY_FILE = "giveaways.json"
 COUNTING_FILE = "counting.json"
+# Note: COUNTING_CHANNEL_ID est maintenant géré dynamiquement via le fichier JSON
 # ==========================================
 
 app = Flask('')
@@ -54,22 +54,27 @@ def load_giveaway():
         except: return {}
     return {}
 
-def save_counting(count, last_user):
-    """Sauvegarde immédiate et forcée dans le fichier JSON pour éviter les pertes au déploiement."""
-    data = {"count": count, "last_user_id": last_user}
+def save_counting(count, last_user, channel_id=None):
+    """Sauvegarde le score, le dernier utilisateur et l'ID du salon de comptage."""
+    # On charge l'existant pour ne pas perdre le channel_id si on ne le précise pas
+    data = {"count": count, "last_user_id": last_user, "channel_id": channel_id}
+    if channel_id is None:
+        old_count, old_user, old_chan = load_counting()
+        data["channel_id"] = old_chan
+
     with open(COUNTING_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
 def load_counting():
-    """Charge les données. Tente d'utiliser le fichier JSON en priorité."""
+    """Charge les données de comptage et l'ID du salon."""
     if os.path.exists(COUNTING_FILE):
         try:
             with open(COUNTING_FILE, "r") as f:
                 data = json.load(f)
-                return int(data.get("count", 0)), data.get("last_user_id", None)
+                return int(data.get("count", 0)), data.get("last_user_id", None), data.get("channel_id", 0)
         except (json.JSONDecodeError, KeyError, ValueError):
-            return 0, None
-    return 0, None
+            return 0, None, 0
+    return 0, None, 0
 
 async def send_log(content):
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -175,23 +180,23 @@ async def check_giveaways():
 # --- Événements ---
 current_count = 0
 last_user_id = None
+active_counting_channel = 0
 
 @bot.event
 async def on_ready():
-    global current_count, last_user_id
+    global current_count, last_user_id, active_counting_channel
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
     
-    # CHARGEMENT ET RÉCUPÉRATION DU SCORE
-    current_count, last_user_id = load_counting()
+    # CHARGEMENT ET RÉCUPÉRATION DU SCORE ET DU CHANNEL
+    current_count, last_user_id, active_counting_channel = load_counting()
     
     if not check_giveaways.is_running():
         check_giveaways.start()
     
-    # Confirmation explicite dans les logs
-    msg = f"✅ **Botixirya** en ligne. Score de comptage restauré : `{current_count}`."
+    msg = f"✅ **Botixirya** en ligne. Score : `{current_count}`, Salon de compte : `{active_counting_channel}`."
     await send_log(msg)
-    print(f"Prêt | Score actuel : {current_count}")
+    print(f"Prêt | Score actuel : {current_count} | Channel : {active_counting_channel}")
 
 @bot.event
 async def on_member_join(member):
@@ -204,28 +209,25 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message(message):
-    global current_count, last_user_id
+    global current_count, last_user_id, active_counting_channel
     if message.author == bot.user: return
     
-    if message.channel.id == COUNTING_CHANNEL_ID:
-        # Synchronisation immédiate avec le fichier avant de traiter le message
-        current_count, last_user_id = load_counting()
+    # Vérification dynamique du salon de comptage
+    if message.channel.id == active_counting_channel:
+        current_count, last_user_id, active_counting_channel = load_counting()
         
         content = message.content.strip()
         if content.isdigit():
             number = int(content)
             
-            # Vérification : Nombre suivant ET pas le même utilisateur
             if number == current_count + 1 and message.author.id != last_user_id:
                 current_count = number
                 last_user_id = message.author.id
                 save_counting(current_count, last_user_id) 
                 await message.add_reaction("✅")
             elif number <= current_count:
-                # On ignore les nombres déjà passés
                 return
             else:
-                # Erreur : Reset complet du fichier et de la variable
                 current_count = 0
                 last_user_id = None
                 save_counting(0, None) 
@@ -251,13 +253,25 @@ async def help(ctx):
         f"Lance un concours automatique avec boutons de participation."
     ), inline=False)
     embed.add_field(name="🕹️ Gestion du Comptage", value=(
-        f"**{COMMAND_PREFIX}score** : Affiche le nombre actuel sauvegardé dans le fichier JSON.\n"
-        f"**{COMMAND_PREFIX}setscore [nombre]** : Définit manuellement la valeur actuelle du compteur (Admin)."
+        f"**{COMMAND_PREFIX}score** : Affiche le nombre actuel sauvegardé.\n"
+        f"**{COMMAND_PREFIX}setscore [nombre]** : Définit manuellement la valeur du compteur (Admin).\n"
+        f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon actuel comme salon de comptage officiel (Admin)."
     ), inline=False)
     embed.add_field(name="📊 Système", value=(
         f"**{COMMAND_PREFIX}ping** : Affiche la latence actuelle du bot."
     ), inline=False)
     await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setcountchannel(ctx):
+    """Définit le salon où la commande est tapée comme le salon actif pour le jeu du comptage."""
+    global active_counting_channel
+    active_counting_channel = ctx.channel.id
+    c, u, _ = load_counting()
+    save_counting(c, u, active_counting_channel)
+    await ctx.send(f"✅ Ce salon est désormais le salon de comptage officiel.")
+    await send_log(f"⚙️ **Configuration** : {ctx.author.mention} a défini {ctx.channel.mention} pour le comptage.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -329,11 +343,10 @@ async def ping(ctx):
 @bot.command()
 async def score(ctx): 
     """Affiche le score actuel de la liste de comptage."""
-    c, _ = load_counting()
+    c, _, _ = load_counting()
     await ctx.send(f"Score actuel : **{c}**.")
 
 if __name__ == "__main__":
     keep_alive()
     token = os.getenv('DISCORD_TOKEN')
     if token: bot.run(token)
-
