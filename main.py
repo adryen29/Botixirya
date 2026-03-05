@@ -55,7 +55,6 @@ def load_giveaway():
 
 def save_counting(count, last_user, channel_id=None):
     """Sauvegarde le score, le dernier utilisateur et l'ID du salon de comptage."""
-    # Récupère l'ancien channel_id pour ne pas l'écraser si on ne le précise pas
     old_count, old_user, old_chan = load_counting()
     data = {
         "count": count, 
@@ -213,7 +212,7 @@ async def on_message(message):
     
     # Vérification dynamique du salon de comptage
     if message.channel.id == active_counting_channel:
-        # Rafraîchir les données depuis le fichier
+        # Rafraîchir les données depuis le fichier pour éviter les décalages
         current_count, last_user_id, active_counting_channel = load_counting()
         
         content = message.content.strip()
@@ -234,6 +233,7 @@ async def on_message(message):
                 await message.add_reaction("❌")
                 await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
         
+    # APPEL UNIQUE POUR LES COMMANDES (Anti-Double)
     await bot.process_commands(message)
 
 # --- Commandes ---
