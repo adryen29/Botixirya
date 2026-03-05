@@ -55,19 +55,19 @@ def load_giveaway():
     return {}
 
 def save_counting(count, last_user):
-    """Sauvegarde immédiate et sécurisée dans le JSON"""
+    """Sauvegarde immédiate et forcée dans le fichier JSON pour éviter les pertes au déploiement."""
     data = {"count": count, "last_user_id": last_user}
     with open(COUNTING_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
 def load_counting():
-    """Charge les données. Si le fichier est vide ou invalide, retourne 0."""
+    """Charge les données. Tente d'utiliser le fichier JSON en priorité."""
     if os.path.exists(COUNTING_FILE):
         try:
             with open(COUNTING_FILE, "r") as f:
                 data = json.load(f)
-                return data.get("count", 0), data.get("last_user_id", None)
-        except (json.JSONDecodeError, KeyError):
+                return int(data.get("count", 0)), data.get("last_user_id", None)
+        except (json.JSONDecodeError, KeyError, ValueError):
             return 0, None
     return 0, None
 
@@ -160,7 +160,6 @@ async def check_giveaways():
                     participants = gw['participants']
                     if len(participants) < gw['winners_count']:
                         await channel.send(f"Fin : Pas assez de participants pour **{gw['prize']}**.")
-                        await send_log(f"📉 **Giveaway Terminé** : `{msg_id}` fini sans assez de participants.")
                     else:
                         winners = random.sample(participants, gw['winners_count'])
                         mentions = ", ".join([f"<@{w}>" for w in winners])
@@ -169,7 +168,6 @@ async def check_giveaways():
                         embed.color = discord.Color.black()
                         await message.edit(embed=embed, view=None)
                         await channel.send(f"🎉 Félicitations {mentions} ! Vous gagnez : **{gw['prize']}** !")
-                        await send_log(f"🏆 **Giveaway Terminé** : Gagnant(s) {mentions} pour **{gw['prize']}**.")
                 except: pass
             gw['ended'] = True
             save_giveaway(data)
@@ -184,14 +182,16 @@ async def on_ready():
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
     
-    # CHARGEMENT RÉEL DEPUIS LE FICHIER
+    # CHARGEMENT ET RÉCUPÉRATION DU SCORE
     current_count, last_user_id = load_counting()
     
     if not check_giveaways.is_running():
         check_giveaways.start()
     
-    await send_log(f"✅ **Botixirya** en ligne. Score de comptage restauré : `{current_count}`.")
-    print(f"Connecté : {bot.user} | Score : {current_count}")
+    # Confirmation explicite dans les logs
+    msg = f"✅ **Botixirya** en ligne. Score de comptage restauré : `{current_count}`."
+    await send_log(msg)
+    print(f"Prêt | Score actuel : {current_count}")
 
 @bot.event
 async def on_member_join(member):
@@ -208,26 +208,29 @@ async def on_message(message):
     if message.author == bot.user: return
     
     if message.channel.id == COUNTING_CHANNEL_ID:
-        # On synchronise avec le fichier à chaque message pour éviter les conflits
+        # Synchronisation immédiate avec le fichier avant de traiter le message
         current_count, last_user_id = load_counting()
         
-        try:
-            content = message.content.strip()
-            if content.isdigit():
-                number = int(content)
-                
-                if number == current_count + 1 and message.author.id != last_user_id:
-                    current_count, last_user_id = number, message.author.id
-                    save_counting(current_count, last_user_id) # Sauvegarde réelle
-                    await message.add_reaction("✅")
-                elif number <= current_count:
-                    return
-                else:
-                    current_count, last_user_id = 0, None
-                    save_counting(0, None) 
-                    await message.add_reaction("❌")
-                    await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
-        except ValueError: pass
+        content = message.content.strip()
+        if content.isdigit():
+            number = int(content)
+            
+            # Vérification : Nombre suivant ET pas le même utilisateur
+            if number == current_count + 1 and message.author.id != last_user_id:
+                current_count = number
+                last_user_id = message.author.id
+                save_counting(current_count, last_user_id) 
+                await message.add_reaction("✅")
+            elif number <= current_count:
+                # On ignore les nombres déjà passés
+                return
+            else:
+                # Erreur : Reset complet du fichier et de la variable
+                current_count = 0
+                last_user_id = None
+                save_counting(0, None) 
+                await message.add_reaction("❌")
+                await message.channel.send(f"⚠️ {message.author.mention} a cassé la suite ! Retour à **1**.")
         
     await bot.process_commands(message)
 
@@ -235,110 +238,99 @@ async def on_message(message):
 
 @bot.command()
 async def help(ctx):
-    """Affiche la liste complète des commandes de Botixirya et leurs fonctions."""
+    """Affiche la liste complète des commandes utilisables avec le préfixe <aav>."""
     embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
     embed.add_field(name="🛡️ Modération (Admin)", value=(
-        f"**{COMMAND_PREFIX}lock** : Désactive l'envoi de messages pour le rôle @everyone dans ce salon.\n"
-        f"**{COMMAND_PREFIX}unlock** : Réactive l'envoi de messages pour le rôle @everyone dans ce salon.\n"
-        f"**{COMMAND_PREFIX}restore** : Supprime le salon actuel et en recrée un identique pour effacer l'historique.\n"
-        f"**{COMMAND_PREFIX}setup_verify** : Envoie le message interactif avec le bouton pour obtenir le rôle membre."
+        f"**{COMMAND_PREFIX}lock** : Verrouille l'envoi de messages dans le salon actuel.\n"
+        f"**{COMMAND_PREFIX}unlock** : Déverrouille l'envoi de messages dans le salon actuel.\n"
+        f"**{COMMAND_PREFIX}restore** : Recrée le salon à neuf pour effacer les messages.\n"
+        f"**{COMMAND_PREFIX}setup_verify** : Installe le bouton de vérification dans le salon configuré."
     ), inline=False)
     embed.add_field(name="🎁 Giveaways (Admin)", value=(
-        f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [récompense] [condition]**\n"
-        f"Crée un concours automatique. Les membres peuvent cliquer pour participer, et l'admin peut Reroll ou Annuler via les boutons."
+        f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**\n"
+        f"Lance un concours automatique avec boutons de participation."
     ), inline=False)
-    embed.add_field(name="🕹️ Divers & Gestion", value=(
-        f"**{COMMAND_PREFIX}ping** : Mesure et affiche la latence entre Discord et le serveur du bot.\n"
-        f"**{COMMAND_PREFIX}score** : Affiche le nombre actuel atteint dans le salon de comptage selon le fichier de sauvegarde.\n"
-        f"**{COMMAND_PREFIX}setscore [nombre]** : Force manuellement le score de comptage à une valeur spécifique (Admin)."
+    embed.add_field(name="🕹️ Gestion du Comptage", value=(
+        f"**{COMMAND_PREFIX}score** : Affiche le nombre actuel sauvegardé dans le fichier JSON.\n"
+        f"**{COMMAND_PREFIX}setscore [nombre]** : Définit manuellement la valeur actuelle du compteur (Admin)."
+    ), inline=False)
+    embed.add_field(name="📊 Système", value=(
+        f"**{COMMAND_PREFIX}ping** : Affiche la latence actuelle du bot."
     ), inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setscore(ctx, number: int):
-    """Force manuellement la valeur du compteur dans le fichier de sauvegarde."""
+    """Permet de modifier manuellement le score de comptage stocké dans le fichier JSON."""
     global current_count, last_user_id
     current_count = number
     last_user_id = None
     save_counting(current_count, last_user_id)
-    await ctx.send(f"✅ Le score de comptage a été manuellement défini sur **{number}**.")
-    await send_log(f"⚙️ **Configuration** : {ctx.author.mention} a forcé le score de comptage à `{number}`.")
+    await ctx.send(f"✅ Le score a été forcé à : **{number}**.")
+    await send_log(f"⚙️ **Admin** : {ctx.author.mention} a changé le score à `{number}`.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setup_verify(ctx):
-    """Envoie l'interface de vérification dans le salon configuré pour accueillir les nouveaux."""
+    """Envoie le module de vérification interactif pour les nouveaux membres."""
     channel = bot.get_channel(VERIFY_CHANNEL_ID)
-    if not channel: return await ctx.send("Salon de vérification introuvable.")
-    embed = discord.Embed(
-        title="🛡️ Vérification Sécurisée",
-        description="Clique sur le bouton ci-dessous pour accéder au serveur.",
-        color=discord.Color.green()
-    )
+    if not channel: return await ctx.send("Salon introuvable.")
+    embed = discord.Embed(title="🛡️ Vérification", description="Cliquez pour accéder au reste du serveur.", color=discord.Color.green())
     await channel.send(embed=embed, view=VerifyView())
-    await ctx.send("✅ Système de vérification installé.")
+    await ctx.send("✅ Système installé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def lock(ctx):
-    """Verrouille le salon actuel en interdisant l'envoi de messages."""
+    """Désactive l'autorisation de parler pour @everyone dans ce salon."""
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
     await ctx.send("🔒 Salon verrouillé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def unlock(ctx):
-    """Déverrouille le salon actuel en autorisant l'envoi de messages."""
+    """Réactive l'autorisation de parler pour @everyone dans ce salon."""
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.send("🔓 Salon déverrouillé.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def restore(ctx):
-    """Clone le salon pour le nettoyer intégralement puis supprime l'ancien."""
-    new_channel = await ctx.channel.clone()
-    await new_channel.edit(position=ctx.channel.position)
+    """Clone et supprime le salon actuel pour un nettoyage total."""
+    new = await ctx.channel.clone()
+    await new.edit(position=ctx.channel.position)
     await ctx.channel.delete()
-    await new_channel.send("✨ Salon restauré.")
+    await new.send("✨ Salon restauré.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def giveaway(ctx, *, args):
-    """Lance un concours avec un temps imparti, un nombre de gagnants et des boutons de gestion."""
-    matches = re.findall(r'\[(.*?)\]', args)
-    if len(matches) < 4:
-        return await ctx.send(f"❌ Format : `{COMMAND_PREFIX}giveaway [minutes] [gagnants] [récompense] [condition]`")
-    try:
-        minutes, winners = int(matches[0]), int(matches[1])
-        prize, req = matches[2], matches[3]
-    except ValueError:
-        return await ctx.send("❌ Erreur : Minutes et gagnants doivent être des chiffres.")
-
-    end_time = time.time() + (minutes * 60)
-    embed = discord.Embed(title="🎉 GIVEAWAY 🎉", color=discord.Color.gold())
-    embed.add_field(name="Récompense", value=prize, inline=False)
-    embed.add_field(name="Fin", value=f"<t:{int(end_time)}:R>", inline=True)
-    embed.add_field(name="Gagnants", value=str(winners), inline=True)
-    embed.add_field(name="Condition", value=req, inline=False)
-    embed.set_footer(text=f"Lancé par {ctx.author.display_name}")
+    """Crée un giveaway. Format : [temps] [gagnants] [récompense] [condition]"""
+    m = re.findall(r'\[(.*?)\]', args)
+    if len(m) < 4: return await ctx.send("Format invalide.")
+    
+    end = time.time() + (int(m[0]) * 60)
+    embed = discord.Embed(title="🎉 GIVEAWAY", color=discord.Color.gold())
+    embed.add_field(name="Récompense", value=m[2], inline=False)
+    embed.add_field(name="Gagnants", value=m[1], inline=True)
+    embed.add_field(name="Fin", value=f"<t:{int(end)}:R>", inline=True)
     
     msg = await ctx.send(embed=embed, view=GiveawayView(bot))
     data = load_giveaway()
-    data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": prize, "winners_count": winners, "end_time": end_time, "participants": [], "ended": False}
+    data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": m[2], "winners_count": int(m[1]), "end_time": end, "participants": [], "ended": False}
     save_giveaway(data)
-    await send_log(f"🎁 **Nouveau Giveaway** lancé par {ctx.author.mention}")
 
 @bot.command()
 async def ping(ctx): 
-    """Affiche la latence actuelle du bot en millisecondes."""
+    """Répond avec la latence du bot en millisecondes."""
     await ctx.send(f"🏓 Pong ! (**{round(bot.latency * 1000)}ms**)")
 
 @bot.command()
 async def score(ctx): 
-    """Récupère et affiche la valeur actuelle du compteur de suite."""
-    c, u = load_counting()
-    await ctx.send(f"Le score actuel sauvegardé est **{c}**.")
+    """Affiche le score actuel de la liste de comptage."""
+    c, _ = load_counting()
+    await ctx.send(f"Score actuel : **{c}**.")
 
 if __name__ == "__main__":
     keep_alive()
