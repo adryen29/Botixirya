@@ -409,6 +409,7 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}mute @user [raison]** : Mute (rôle Muted + retire rôle Membre).\n"
         f"**{COMMAND_PREFIX}unmute @user** : Unmute (retire Muted + redonne Membre).\n"
         f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine anti-raid **(owner only)**.\n"
+        f"**{COMMAND_PREFIX}unsafe @user** : Remet un utilisateur en quarantaine **(owner only)**.\n"
         f"**{COMMAND_PREFIX}Give_Role_Back @user** : Restaure les rôles depuis la sauvegarde Discord **(owner only)**."
     ), inline=False)
     embed.add_field(name="🎁 Giveaway", value=f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**", inline=False)
@@ -685,6 +686,15 @@ async def safe(ctx, user: discord.Member):
         await ctx.send(f"✅ Restrictions levées pour {user.mention} (pas en quarantaine formelle).")
 
     await send_log(f"🛡️ **Safe** : {user.mention} libéré par {ctx.author.mention}")
+
+@bot.command()
+async def unsafe(ctx, user: discord.Member):
+    """Remet un utilisateur en quarantaine manuellement. (Owner uniquement)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
+
+    await quarantine_user(ctx.guild, user)
+    await ctx.send(f"🔒 {user.mention} remis en quarantaine.")
 
 @bot.command()
 async def Give_Role_Back(ctx, user: discord.Member):
