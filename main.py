@@ -6,7 +6,7 @@ import asyncio
 import time
 import random
 import re
-import sys  # Variable visible : nécessaire pour la commande kill
+import sys
 from flask import Flask
 from threading import Thread
 
@@ -15,12 +15,11 @@ from threading import Thread
 # ==========================================
 COMMAND_PREFIX = "<aav>"
 LOG_CHANNEL_ID = 1478437400496705721
-DB_CHANNEL_ID = 1479105188454338611 # Salon Discord servant de base de données
+DB_CHANNEL_ID = 1479105188454338611  # Salon Discord servant de base de données
 VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
 ROLE_VERIFIED_ID = 1477170552950231164
 GIVEAWAY_FILE = "giveaways.json"
-COUNTING_FILE = "counting.json"
 # ==========================================
 
 app = Flask('')
@@ -39,10 +38,10 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True 
+intents.members = True
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
-# --- Gestion des données ---
+# --- Gestion des données Giveaway ---
 def save_giveaway(data):
     with open(GIVEAWAY_FILE, "w") as f:
         json.dump(data, f, indent=4)
@@ -52,28 +51,18 @@ def load_giveaway():
         try:
             with open(GIVEAWAY_FILE, "r") as f:
                 return json.load(f)
-        except: return {}
+        except:
+            return {}
     return {}
 
-def save_counting(count, last_user, channel_id=None):
-    """Sauvegarde locale (éphémère)"""
-    data = {"count": count, "last_user_id": last_user, "channel_id": channel_id}
-    if channel_id is None:
-        _, _, old_chan = load_counting()
-        data["channel_id"] = old_chan
-    with open(COUNTING_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-def load_counting():
-    """Charge les données du fichier local"""
-    if os.path.exists(COUNTING_FILE):
-        try:
-            with open(COUNTING_FILE, "r") as f:
-                data = json.load(f)
-                return int(data.get("count", 0)), data.get("last_user_id", None), data.get("channel_id", 0)
-        except:
-            return 0, None, 0
-    return 0, None, 0
+# --- Sauvegarde du comptage dans le salon DB ---
+async def save_counting_to_db():
+    """Envoie une sauvegarde du comptage dans le salon DB Discord."""
+    db_chan = bot.get_channel(DB_CHANNEL_ID)
+    if db_chan:
+        await db_chan.send(
+            f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}"
+        )
 
 async def send_log(content):
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -120,7 +109,8 @@ class GiveawayView(discord.ui.View):
 
     @discord.ui.button(label="Reroll 🎲", style=discord.ButtonStyle.gray, custom_id="reroll_gw")
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator: return
+        if not interaction.user.guild_permissions.administrator:
+            return
         data = load_giveaway()
         gw_id = str(interaction.message.id)
         if gw_id in data and data[gw_id]['participants']:
@@ -130,7 +120,8 @@ class GiveawayView(discord.ui.View):
 
     @discord.ui.button(label="Annuler ❌", style=discord.ButtonStyle.danger, custom_id="delete_gw")
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator: return
+        if not interaction.user.guild_permissions.administrator:
+            return
         await interaction.message.delete()
 
 @tasks.loop(seconds=30)
@@ -152,31 +143,29 @@ async def on_ready():
     global current_count, last_user_id, active_counting_channel
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
-    
-    # Tentative de restauration depuis le salon DB (Priorité)
+
+    # Restauration depuis le salon DB Discord (seule source de vérité)
     db_chan = bot.get_channel(DB_CHANNEL_ID)
     if db_chan:
-        async for message in db_chan.history(limit=10):
+        async for message in db_chan.history(limit=50):
             if "BACKUP_COUNT|" in message.content:
                 parts = message.content.split("|")
                 current_count = int(parts[1])
                 last_user_id = int(parts[2]) if parts[2] != "None" else None
                 active_counting_channel = int(parts[3])
                 break
-    else:
-        # Repli sur le fichier local si le salon n'est pas accessible
-        current_count, last_user_id, active_counting_channel = load_counting()
-    
+
     if not check_giveaways.is_running():
         check_giveaways.start()
-    
+
     await send_log(f"✅ **Botixirya** prêt. Score actuel : `{current_count}`")
 
 @bot.event
 async def on_message(message):
     global current_count, last_user_id, active_counting_channel
-    if message.author == bot.user: return
-    
+    if message.author == bot.user:
+        return
+
     if message.channel.id == active_counting_channel:
         content = message.content.strip()
         if content.isdigit():
@@ -184,17 +173,17 @@ async def on_message(message):
             if number == current_count + 1 and message.author.id != last_user_id:
                 current_count = number
                 last_user_id = message.author.id
-                save_counting(current_count, last_user_id)
+                await save_counting_to_db()
                 await message.add_reaction("✅")
             elif number <= current_count:
                 return
             else:
                 current_count = 0
                 last_user_id = None
-                save_counting(0, None)
+                await save_counting_to_db()
                 await message.add_reaction("❌")
                 await message.channel.send("⚠️ Suite cassée ! Retour à 1.")
-        
+
     await bot.process_commands(message)
 
 # --- Commandes ---
@@ -221,13 +210,7 @@ async def help(ctx):
 @commands.has_permissions(administrator=True)
 async def kill(ctx):
     """Envoie une sauvegarde dans le salon DB et ferme le bot."""
-    global current_count, last_user_id, active_counting_channel
-    
-    db_chan = bot.get_channel(DB_CHANNEL_ID)
-    if db_chan:
-        await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
-    
-    save_counting(current_count, last_user_id, active_counting_channel)
+    await save_counting_to_db()
     await ctx.send("💀 Données sauvegardées dans le salon DB. Extinction...")
     await asyncio.sleep(2)
     await bot.close()
@@ -239,12 +222,7 @@ async def setcountchannel(ctx):
     """Définit ce salon pour le comptage."""
     global active_counting_channel
     active_counting_channel = ctx.channel.id
-    save_counting(current_count, last_user_id, active_counting_channel)
-    
-    db_chan = bot.get_channel(DB_CHANNEL_ID)
-    if db_chan:
-        await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
-        
+    await save_counting_to_db()
     await ctx.send("✅ Salon de comptage défini.")
 
 @bot.command()
@@ -254,12 +232,7 @@ async def setscore(ctx, number: int):
     global current_count, last_user_id
     current_count = number
     last_user_id = None
-    save_counting(current_count, last_user_id)
-    
-    db_chan = bot.get_channel(DB_CHANNEL_ID)
-    if db_chan:
-        await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
-        
+    await save_counting_to_db()
     await ctx.send(f"✅ Score fixé à {number}.")
 
 @bot.command()
@@ -289,13 +262,21 @@ async def restore(ctx):
 async def giveaway(ctx, *, args):
     """Lance un giveaway. Format : [min] [gagnants] [prix] [condition]"""
     m = re.findall(r'\[(.*?)\]', args)
-    if len(m) < 4: return
+    if len(m) < 4:
+        return
     end = time.time() + (int(m[0]) * 60)
     embed = discord.Embed(title="🎉 GIVEAWAY", color=discord.Color.gold())
     embed.add_field(name="Prix", value=m[2])
     msg = await ctx.send(embed=embed, view=GiveawayView(bot))
     data = load_giveaway()
-    data[str(msg.id)] = {"channel_id": ctx.channel.id, "prize": m[2], "winners_count": int(m[1]), "end_time": end, "participants": [], "ended": False}
+    data[str(msg.id)] = {
+        "channel_id": ctx.channel.id,
+        "prize": m[2],
+        "winners_count": int(m[1]),
+        "end_time": end,
+        "participants": [],
+        "ended": False
+    }
     save_giveaway(data)
 
 @bot.command()
@@ -311,4 +292,5 @@ async def score(ctx):
 if __name__ == "__main__":
     keep_alive()
     token = os.getenv('DISCORD_TOKEN')
-    if token: bot.run(token)
+    if token:
+        bot.run(token)
