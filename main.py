@@ -7,6 +7,7 @@ import time
 import random
 import re
 import sys
+import io
 from flask import Flask
 from threading import Thread
 
@@ -15,27 +16,29 @@ from threading import Thread
 # ==========================================
 COMMAND_PREFIX = "<aav>"
 LOG_CHANNEL_ID = 1478437400496705721
-DB_CHANNEL_ID = 1479105188454338611         # Salon Discord servant de base de données
+DB_CHANNEL_ID = 1479105188454338611             # Salon Discord servant de base de données
 VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
 ROLE_VERIFIED_ID = 1477170552950231164
 GIVEAWAY_FILE = "giveaways.json"
 
-BAN_LOG_CHANNEL_ID = 1481201790375563498    # Logs bans
-KICK_LOG_CHANNEL_ID = 1481202403574284310   # Logs kicks
-MUTE_LOG_CHANNEL_ID = 1481202820500684841   # Logs mutes
-MUTED_ROLE_ID = 1481203639107325983         # Rôle Muted
+BAN_LOG_CHANNEL_ID = 1481201790375563498         # Logs bans
+KICK_LOG_CHANNEL_ID = 1481202403574284310        # Logs kicks
+MUTE_LOG_CHANNEL_ID = 1481202820500684841        # Logs mutes
+MUTED_ROLE_ID = 1481203639107325983              # Rôle Muted
 BANS_FILE = "bans.json"
 
-OWNER_ID = 1339332485930160189              # ID du propriétaire
-MAIN_SERVER_ID = 1472951773026062482        # Serveur principal
-BACKUP_SERVER_ID = 1481205788566618115      # Serveur de backup
+OWNER_ID = 1339332485930160189                   # ID du propriétaire
+MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
+BACKUP_SERVER_ID = 1481205788566618115           # Serveur de backup
 
-RAID_THRESHOLD = 3    # Nombre de suppressions déclenchant l'anti-raid
-RAID_WINDOW = 30      # Fenêtre de temps en secondes
+RAID_THRESHOLD = 3                               # Nb suppressions déclenchant l'anti-raid
+RAID_WINDOW = 30                                 # Fenêtre de temps en secondes
 
-ROLE_BACKUP_CHANNEL_ID = 1481211118843203647  # Sauvegarde des rôles avant quarantaine
-RAID_LOG_CHANNEL_ID = 1481211696109326466     # Logs des tentatives de raid
+ROLE_BACKUP_CHANNEL_ID = 1481211118843203647     # Sauvegarde des rôles avant quarantaine
+RAID_LOG_CHANNEL_ID = 1481211696109326466        # Logs des tentatives de raid
+
+TICKET_MEMORY_CHANNEL_ID = 1482417571549544690   # Mémoire des configs de tickets
 # ==========================================
 
 # --- État global ---
@@ -43,8 +46,9 @@ current_count = 0
 last_user_id = None
 active_counting_channel = 0
 commands_on_backup = False
-deletion_tracker = {}   # {guild_id: {user_id: {"channels": [...], "roles": [...]}}}
-quarantined_users = {}  # {user_id: [role_ids]}
+deletion_tracker = {}    # {guild_id: {user_id: {"channels": [...], "roles": [...]}}}
+quarantined_users = {}   # {user_id: [role_ids]}
+ticket_configs = {}      # {actual_channel_id: {category_id, logs_channel_id, channel_message, inside_ticket_message}}
 
 # ==========================================
 
@@ -119,11 +123,51 @@ async def send_log(content):
         await channel.send(content)
 
 # ==========================================
+# SYSTÈME DE TICKETS — MÉMOIRE
+# ==========================================
+
+async def save_ticket_config(config: dict):
+    """
+    Sauvegarde une config de ticket dans le salon mémoire.
+    Format : TICKET_CONFIG|<json>
+    Remplace l'entrée existante si l'actual_channel_id est déjà présent.
+    """
+    mem_chan = bot.get_channel(TICKET_MEMORY_CHANNEL_ID)
+    if not mem_chan:
+        return
+    # Supprimer l'ancienne entrée pour ce channel si elle existe
+    async for msg in mem_chan.history(limit=200):
+        if msg.content.startswith("TICKET_CONFIG|"):
+            try:
+                old = json.loads(msg.content[len("TICKET_CONFIG|"):])
+                if old.get("actual_channel_id") == config["actual_channel_id"]:
+                    await msg.delete()
+                    break
+            except:
+                pass
+    await mem_chan.send(f"TICKET_CONFIG|{json.dumps(config, ensure_ascii=False)}")
+
+async def load_ticket_configs():
+    """Charge toutes les configs de tickets depuis le salon mémoire au démarrage."""
+    global ticket_configs
+    mem_chan = bot.get_channel(TICKET_MEMORY_CHANNEL_ID)
+    if not mem_chan:
+        return
+    async for msg in mem_chan.history(limit=200):
+        if msg.content.startswith("TICKET_CONFIG|"):
+            try:
+                config = json.loads(msg.content[len("TICKET_CONFIG|"):])
+                cid = config["actual_channel_id"]
+                ticket_configs[cid] = config
+            except:
+                pass
+
+# ==========================================
 # ANTI-RAID
 # ==========================================
 
 async def quarantine_user(guild, member):
-    """Retire tous les rôles et bloque toutes les permissions d'un membre. Seul le propriétaire est immunisé."""
+    """Retire tous les rôles et bloque toutes les permissions. Seul le propriétaire est immunisé."""
     if member.id == OWNER_ID:
         return
 
@@ -131,21 +175,19 @@ async def quarantine_user(guild, member):
     roles_avant = [r.id for r in member.roles if r != guild.default_role]
     quarantined_users[user_id] = roles_avant
 
-    # --- Sauvegarde des rôles dans le salon dédié ---
+    # Sauvegarde des rôles dans le salon dédié
     role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
     if role_backup_chan and roles_avant:
         roles_str = ",".join(str(r) for r in roles_avant)
-        await role_backup_chan.send(
-            f"ROLE_BACKUP|{guild.id}|{member.id}|{roles_str}"
-        )
+        await role_backup_chan.send(f"ROLE_BACKUP|{guild.id}|{member.id}|{roles_str}")
 
-    # --- Retrait des rôles ---
+    # Retrait des rôles
     try:
         await member.edit(roles=[], reason="Anti-Raid : suppressions en masse détectées")
     except:
         pass
 
-    # --- Blocage de tous les salons ---
+    # Blocage de tous les salons
     for channel in guild.channels:
         try:
             await channel.set_permissions(
@@ -159,9 +201,8 @@ async def quarantine_user(guild, member):
         except:
             pass
 
-    # --- Log dans le salon raid ---
-    raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
     tag = "🤖 **BOT**" if member.bot else "👤 **Utilisateur**"
+    raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
     if raid_log_chan:
         await raid_log_chan.send(
             f"🚨 **TENTATIVE DE RAID DÉTECTÉE**\n"
@@ -171,7 +212,6 @@ async def quarantine_user(guild, member):
             f"Utilisez `{COMMAND_PREFIX}safe @{member.name}` ou `{COMMAND_PREFIX}Give_Role_Back @{member.name}` pour intervenir."
         )
 
-    # --- Log général ---
     log_chan = bot.get_channel(LOG_CHANNEL_ID)
     if log_chan:
         await log_chan.send(
@@ -179,7 +219,7 @@ async def quarantine_user(guild, member):
         )
 
 async def track_deletion(guild, user, dtype):
-    """Suit les suppressions d'un utilisateur. dtype : 'channels' ou 'roles'. Seul le propriétaire est immunisé."""
+    """Suit les suppressions. dtype : 'channels' ou 'roles'. Seul le propriétaire est immunisé."""
     if user.id == OWNER_ID:
         return
 
@@ -198,13 +238,13 @@ async def track_deletion(guild, user, dtype):
 
     total = len(tracker["channels"]) + len(tracker["roles"])
     if total >= RAID_THRESHOLD:
-        deletion_tracker[gid][uid] = {"channels": [], "roles": []}  # Reset
+        deletion_tracker[gid][uid] = {"channels": [], "roles": []}
         member = guild.get_member(user.id)
         if member:
             await quarantine_user(guild, member)
 
 # ==========================================
-# VIEWS
+# VIEWS — VÉRIFICATION & GIVEAWAY
 # ==========================================
 
 class VerifyView(discord.ui.View):
@@ -262,6 +302,161 @@ class GiveawayView(discord.ui.View):
         await interaction.message.delete()
 
 # ==========================================
+# VIEWS — TICKETS
+# ==========================================
+
+class TicketCreateView(discord.ui.View):
+    """
+    Vue persistante avec le bouton 'Create Ticket'.
+    Le custom_id encode l'ID du salon de création pour retrouver la config.
+    """
+    def __init__(self, actual_channel_id: int):
+        super().__init__(timeout=None)
+        self.actual_channel_id = actual_channel_id
+        btn = discord.ui.Button(
+            label="🎫 Create Ticket",
+            style=discord.ButtonStyle.blurple,
+            custom_id=f"create_ticket:{actual_channel_id}"
+        )
+        btn.callback = self.create_ticket_callback
+        self.add_item(btn)
+
+    async def create_ticket_callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+
+        # Récupération de la config via l'ID du salon encodé dans le custom_id
+        channel_id = int(interaction.data["custom_id"].split(":")[1])
+        config = ticket_configs.get(channel_id)
+        if not config:
+            return await interaction.response.send_message(
+                "❌ Configuration du ticket introuvable.", ephemeral=True
+            )
+
+        # Vérifier si l'utilisateur a déjà un ticket ouvert
+        ticket_channel_name = f"ticket-{user.name.lower().replace(' ', '-')}"
+        existing = discord.utils.get(guild.text_channels, name=ticket_channel_name)
+        if existing:
+            return await interaction.response.send_message(
+                f"❌ Tu as déjà un ticket ouvert : {existing.mention}", ephemeral=True
+            )
+
+        # Catégorie cible
+        category = guild.get_channel(config["category_id"])
+
+        # Création du salon ticket avec permissions restreintes
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+        }
+        # Donner accès aux admins
+        for role in guild.roles:
+            if role.permissions.administrator:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        try:
+            ticket_channel = await guild.create_text_channel(
+                name=ticket_channel_name,
+                category=category,
+                overwrites=overwrites,
+                topic=f"TICKET|{user.id}|{config['logs_channel_id']}",
+                reason=f"Ticket créé par {user}"
+            )
+        except Exception as e:
+            return await interaction.response.send_message(f"❌ Erreur création ticket : {e}", ephemeral=True)
+
+        # Message d'accueil dans le ticket
+        embed = discord.Embed(
+            description=config["inside_ticket_message"],
+            color=discord.Color.blurple()
+        )
+        embed.set_footer(text=f"Ticket de {user.display_name}")
+        await ticket_channel.send(
+            content=f"{user.mention}",
+            embed=embed,
+            view=CloseTicketView()
+        )
+
+        await interaction.response.send_message(
+            f"✅ Ton ticket a été créé : {ticket_channel.mention}", ephemeral=True
+        )
+
+
+class CloseTicketView(discord.ui.View):
+    """Vue persistante avec le bouton 'Close Ticket'."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        guild = interaction.guild
+        user = interaction.user
+
+        # Lecture des infos depuis le topic du salon
+        topic = channel.topic or ""
+        ticket_owner_id = None
+        logs_channel_id = None
+
+        if topic.startswith("TICKET|"):
+            parts = topic.split("|")
+            if len(parts) >= 3:
+                try:
+                    ticket_owner_id = int(parts[1])
+                    logs_channel_id = int(parts[2])
+                except:
+                    pass
+
+        # Seuls le créateur du ticket, les admins et le propriétaire peuvent fermer
+        is_admin = user.guild_permissions.administrator
+        is_owner = user.id == OWNER_ID
+        is_creator = user.id == ticket_owner_id
+
+        if not (is_admin or is_owner or is_creator):
+            return await interaction.response.send_message(
+                "❌ Tu n'as pas la permission de fermer ce ticket.", ephemeral=True
+            )
+
+        await interaction.response.send_message("🔒 Fermeture du ticket en cours...")
+
+        # --- Collecte des messages pour les logs ---
+        messages = []
+        async for msg in channel.history(limit=500, oldest_first=True):
+            if msg.author == guild.me and msg.components:
+                continue  # Ignorer les messages avec boutons (les messages du bot)
+            if msg.content:
+                messages.append(f"{msg.author.display_name}:\n{msg.content}\n")
+
+        log_content = "\n".join(messages) if messages else "(aucun message)"
+
+        # --- Envoi du fichier TXT dans le salon de logs ---
+        if logs_channel_id:
+            logs_chan = bot.get_channel(logs_channel_id)
+            if logs_chan:
+                txt_bytes = log_content.encode("utf-8")
+                txt_file = discord.File(
+                    fp=io.BytesIO(txt_bytes),
+                    filename=f"ticket-{channel.name}-{int(time.time())}.txt"
+                )
+                ticket_owner_mention = f"<@{ticket_owner_id}>" if ticket_owner_id else channel.name
+                await logs_chan.send(
+                    content=(
+                        f"📁 **Ticket fermé** — ticket de {ticket_owner_mention}\n"
+                        f"Fermé par : {user.mention}\n"
+                        f"Voici les logs de la conversation :"
+                    ),
+                    file=txt_file
+                )
+
+        # Suppression du salon après un court délai
+        await asyncio.sleep(3)
+        try:
+            await channel.delete(reason=f"Ticket fermé par {user}")
+        except:
+            pass
+
+# ==========================================
 # TÂCHES PÉRIODIQUES
 # ==========================================
 
@@ -312,7 +507,9 @@ async def on_ready():
     global current_count, last_user_id, active_counting_channel
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
+    bot.add_view(CloseTicketView())
 
+    # Restauration du score depuis le salon DB
     db_chan = bot.get_channel(DB_CHANNEL_ID)
     if db_chan:
         async for message in db_chan.history(limit=50):
@@ -323,12 +520,17 @@ async def on_ready():
                 active_counting_channel = int(parts[3])
                 break
 
+    # Restauration des configs de tickets + enregistrement des vues persistantes
+    await load_ticket_configs()
+    for channel_id, config in ticket_configs.items():
+        bot.add_view(TicketCreateView(channel_id))
+
     if not check_giveaways.is_running():
         check_giveaways.start()
     if not check_bans.is_running():
         check_bans.start()
 
-    await send_log(f"✅ **Botixirya** prêt. Score actuel : `{current_count}`")
+    await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
 @bot.event
 async def on_message(message):
@@ -402,19 +604,25 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}restore** : Recrée le salon actuel."
     ), inline=False)
     embed.add_field(name="🔨 Modération", value=(
-        f"**{COMMAND_PREFIX}msgdel [nb] (@user)** : Supprime des messages (optionnel : filtre par user).\n"
-        f"**{COMMAND_PREFIX}ban @user [min] [raison]** : Bannit pour X minutes (0 = permanent).\n"
-        f"**{COMMAND_PREFIX}pardon @user** : Débannit un utilisateur.\n"
-        f"**{COMMAND_PREFIX}kick @user [raison]** : Expulse un utilisateur.\n"
-        f"**{COMMAND_PREFIX}mute @user [raison]** : Mute (rôle Muted + retire rôle Membre).\n"
-        f"**{COMMAND_PREFIX}unmute @user** : Unmute (retire Muted + redonne Membre).\n"
-        f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine anti-raid **(owner only)**.\n"
-        f"**{COMMAND_PREFIX}unsafe @user** : Remet un utilisateur en quarantaine **(owner only)**.\n"
-        f"**{COMMAND_PREFIX}Give_Role_Back @user** : Restaure les rôles depuis la sauvegarde Discord **(owner only)**."
+        f"**{COMMAND_PREFIX}msgdel [nb] (@user)** : Supprime des messages.\n"
+        f"**{COMMAND_PREFIX}ban @user [min] [raison]** : Bannit (0 = permanent).\n"
+        f"**{COMMAND_PREFIX}pardon @user** : Débannit.\n"
+        f"**{COMMAND_PREFIX}kick @user [raison]** : Expulse.\n"
+        f"**{COMMAND_PREFIX}mute @user [raison]** : Mute.\n"
+        f"**{COMMAND_PREFIX}unmute @user** : Unmute.\n"
+        f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine **(owner only)**.\n"
+        f"**{COMMAND_PREFIX}unsafe @user** : Remet en quarantaine **(owner only)**.\n"
+        f"**{COMMAND_PREFIX}Give_Role_Back @user** : Restaure les rôles **(owner only)**."
     ), inline=False)
-    embed.add_field(name="🎁 Giveaway", value=f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**", inline=False)
+    embed.add_field(name="🎫 Tickets", value=(
+        f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
+        f"→ Configure un point de création de tickets dans le salon spécifié."
+    ), inline=False)
+    embed.add_field(name="🎁 Giveaway", value=(
+        f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**"
+    ), inline=False)
     embed.add_field(name="💾 Backup", value=(
-        f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup server only)*.\n"
+        f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
         f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup *(owner only)*."
     ), inline=False)
     await ctx.send(embed=embed)
@@ -424,7 +632,7 @@ async def help(ctx):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def kill(ctx):
-    """Éteint le bot (le score est déjà sauvegardé en temps réel)."""
+    """Éteint le bot (score sauvegardé en temps réel)."""
     await ctx.send("💀 Extinction...")
     await asyncio.sleep(2)
     await bot.close()
@@ -564,7 +772,6 @@ async def ban(ctx, user: discord.Member, duration: int, *, reason: str = "Aucune
             f"⏱️ Durée : {duration_str}\n"
             f"📝 Raison : {reason}"
         )
-
     await ctx.send(f"🔨 {user.mention} banni ({duration_str}). Raison : {reason}")
 
 @bot.command()
@@ -585,7 +792,6 @@ async def pardon(ctx, user: discord.User):
     log_chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
     if log_chan:
         await log_chan.send(f"✅ **Unban** : {user} (`{user.id}`) pardonné par {ctx.author.mention}")
-
     await ctx.send(f"✅ {user} a été débanni.")
 
 @bot.command()
@@ -604,7 +810,6 @@ async def kick(ctx, user: discord.Member, *, reason: str = "Aucune raison fourni
             f"👮 Par : {ctx.author.mention}\n"
             f"📝 Raison : {reason}"
         )
-
     await ctx.send(f"👢 {user.mention} expulsé. Raison : {reason}")
 
 @bot.command()
@@ -631,7 +836,6 @@ async def mute(ctx, user: discord.Member, *, reason: str = "Aucune raison fourni
             f"👮 Par : {ctx.author.mention}\n"
             f"📝 Raison : {reason}"
         )
-
     await ctx.send(f"🔇 {user.mention} mute. Raison : {reason}")
 
 @bot.command()
@@ -656,7 +860,7 @@ async def unmute(ctx, user: discord.Member):
 
 @bot.command()
 async def safe(ctx, user: discord.Member):
-    """Lève la quarantaine anti-raid d'un utilisateur et restaure ses rôles. (Owner uniquement)"""
+    """Lève la quarantaine anti-raid et restaure les rôles en mémoire. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
@@ -706,7 +910,6 @@ async def Give_Role_Back(ctx, user: discord.Member):
     if not role_backup_chan:
         return await ctx.send("❌ Salon de sauvegarde des rôles introuvable.")
 
-    # Recherche de la dernière sauvegarde pour cet utilisateur
     found_roles = None
     async for message in role_backup_chan.history(limit=200):
         if f"ROLE_BACKUP|{ctx.guild.id}|{user.id}|" in message.content:
@@ -729,7 +932,6 @@ async def Give_Role_Back(ctx, user: discord.Member):
     except Exception as e:
         return await ctx.send(f"❌ Erreur lors de la restauration : {e}")
 
-    # Nettoyage des overrides de permissions
     for channel in ctx.guild.channels:
         try:
             overwrite = channel.overwrites_for(user)
@@ -738,7 +940,6 @@ async def Give_Role_Back(ctx, user: discord.Member):
         except:
             pass
 
-    # Nettoyage en mémoire si présent
     user_id = str(user.id)
     if user_id in quarantined_users:
         del quarantined_users[user_id]
@@ -750,8 +951,72 @@ async def Give_Role_Back(ctx, user: discord.Member):
             f"✅ **Give_Role_Back** : {user.mention} (`{user.id}`)\n"
             f"Rôles restaurés par {ctx.author.mention} : {roles_names}"
         )
-
     await ctx.send(f"✅ Rôles restaurés pour {user.mention} ({len(roles_to_restore)} rôle(s)).")
+
+# --- Tickets ---
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def TicketCreatingChannel(ctx, *, args):
+    """
+    Configure un point de création de tickets.
+    Format : [category_id] [logs_channel_id] [ChannelMessage] [InsideTicketMessage] [actual_channel_id]
+    """
+    m = re.findall(r'\[(.*?)\]', args)
+    if len(m) < 5:
+        return await ctx.send(
+            f"❌ Format incorrect. Usage :\n"
+            f"`{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message du salon] [Message du ticket] [channel_id]`"
+        )
+
+    try:
+        category_id = int(m[0])
+        logs_channel_id = int(m[1])
+        channel_message = m[2]
+        inside_ticket_message = m[3]
+        actual_channel_id = int(m[4])
+    except ValueError:
+        return await ctx.send("❌ Les IDs doivent être des nombres entiers.")
+
+    # Vérifications
+    category = ctx.guild.get_channel(category_id)
+    if not category or not isinstance(category, discord.CategoryChannel):
+        return await ctx.send(f"❌ Catégorie introuvable avec l'ID `{category_id}`.")
+
+    actual_channel = ctx.guild.get_channel(actual_channel_id)
+    if not actual_channel:
+        return await ctx.send(f"❌ Salon introuvable avec l'ID `{actual_channel_id}`.")
+
+    logs_channel = ctx.guild.get_channel(logs_channel_id)
+    if not logs_channel:
+        return await ctx.send(f"❌ Salon de logs introuvable avec l'ID `{logs_channel_id}`.")
+
+    # Sauvegarde de la config
+    config = {
+        "actual_channel_id": actual_channel_id,
+        "category_id": category_id,
+        "logs_channel_id": logs_channel_id,
+        "channel_message": channel_message,
+        "inside_ticket_message": inside_ticket_message
+    }
+    ticket_configs[actual_channel_id] = config
+    await save_ticket_config(config)
+
+    # Enregistrement de la vue persistante
+    view = TicketCreateView(actual_channel_id)
+    bot.add_view(view)
+
+    # Envoi du message dans le salon cible
+    embed = discord.Embed(
+        description=channel_message,
+        color=discord.Color.blurple()
+    )
+    await actual_channel.send(embed=embed, view=view)
+
+    await ctx.send(
+        f"✅ Système de tickets configuré dans {actual_channel.mention}.\n"
+        f"Catégorie : `{category.name}` | Logs : {logs_channel.mention}"
+    )
 
 # ==========================================
 # COMMANDES BACKUP SERVER
@@ -770,7 +1035,7 @@ async def COMMANDSON(ctx):
 
 @bot.command()
 async def backup(ctx):
-    """Copie la structure (rôles, catégories, salons) du serveur principal vers ce serveur. (backup server only)"""
+    """Copie la structure du serveur principal vers ce serveur. (backup server only)"""
     if ctx.guild.id != BACKUP_SERVER_ID:
         return await ctx.send("❌ Cette commande ne fonctionne que sur le serveur de backup.")
     if ctx.author.id != OWNER_ID:
