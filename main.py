@@ -37,8 +37,14 @@ RAID_WINDOW = 30                                 # Fenêtre de temps en secondes
 
 ROLE_BACKUP_CHANNEL_ID = 1481211118843203647     # Sauvegarde des rôles avant quarantaine
 RAID_LOG_CHANNEL_ID = 1481211696109326466        # Logs des tentatives de raid
+RAIDER_ROLE_ID = 1482735894745186435             # Rôle donné aux raiders
 
 TICKET_MEMORY_CHANNEL_ID = 1482417571549544690   # Mémoire des configs de tickets
+
+# --- Rôles et zones à vérifier toutes les 20 minutes ---
+# Rôle non-vérifié : aucun accès sauf la catégorie et le salon ci-dessous
+PERM_UNVERIFIED_EXCEPTION_CATEGORY = 1478663941168037898
+PERM_UNVERIFIED_EXCEPTION_CHANNEL = 1478669348989177997
 # ==========================================
 
 # --- État global ---
@@ -200,9 +206,11 @@ async def quarantine_user(guild, member, silent: bool = False):
             view=RestoreRolesView(guild.id, member.id)
         )
 
-    # --- Retrait des rôles ---
+    # --- Retrait des rôles + attribution du rôle Raider ---
+    raider_role = guild.get_role(RAIDER_ROLE_ID)
     try:
-        await member.edit(roles=[], reason="Quarantaine" if silent else "Anti-Raid : suppressions en masse détectées")
+        new_roles = [raider_role] if raider_role else []
+        await member.edit(roles=new_roles, reason="Quarantaine" if silent else "Anti-Raid : suppressions en masse détectées")
     except:
         pass
 
@@ -634,6 +642,83 @@ async def check_bans():
     if to_remove:
         save_bans(bans)
 
+@tasks.loop(minutes=20)
+async def enforce_permissions():
+    """
+    Toutes les 20 minutes, vérifie et corrige les permissions pour :
+    - Rôle non-vérifié (ROLE_UNVERIFIED_ID) : aucun accès sauf catégorie + salon exceptions
+    - Rôle Raider (RAIDER_ROLE_ID)          : aucun accès nulle part
+    - Rôle Muted (MUTED_ROLE_ID)            : ne peut pas envoyer de messages
+    """
+    for guild in bot.guilds:
+        unverified_role = guild.get_role(ROLE_UNVERIFIED_ID)
+        raider_role     = guild.get_role(RAIDER_ROLE_ID)
+        muted_role      = guild.get_role(MUTED_ROLE_ID)
+
+        for channel in guild.channels:
+            # --- Rôle non-vérifié ---
+            if unverified_role:
+                is_exception = (
+                    channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL
+                    or channel.id == PERM_UNVERIFIED_EXCEPTION_CATEGORY
+                    or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY
+                )
+                if is_exception:
+                    # S'assurer qu'il peut lire/écrire dans les exceptions
+                    target_ow = channel.overwrites_for(unverified_role)
+                    if target_ow.read_messages is not True:
+                        try:
+                            await channel.set_permissions(
+                                unverified_role,
+                                read_messages=True,
+                                send_messages=True,
+                                reason="enforce_permissions : exception non-vérifié"
+                            )
+                        except:
+                            pass
+                else:
+                    # Bloquer partout ailleurs
+                    target_ow = channel.overwrites_for(unverified_role)
+                    if target_ow.read_messages is not False:
+                        try:
+                            await channel.set_permissions(
+                                unverified_role,
+                                read_messages=False,
+                                send_messages=False,
+                                reason="enforce_permissions : non-vérifié bloqué"
+                            )
+                        except:
+                            pass
+
+            # --- Rôle Raider ---
+            if raider_role:
+                target_ow = channel.overwrites_for(raider_role)
+                if target_ow.read_messages is not False:
+                    try:
+                        await channel.set_permissions(
+                            raider_role,
+                            read_messages=False,
+                            send_messages=False,
+                            reason="enforce_permissions : raider bloqué"
+                        )
+                    except:
+                        pass
+
+            # --- Rôle Muted ---
+            if muted_role:
+                target_ow = channel.overwrites_for(muted_role)
+                if target_ow.send_messages is not False:
+                    try:
+                        await channel.set_permissions(
+                            muted_role,
+                            send_messages=False,
+                            reason="enforce_permissions : muted bloqué"
+                        )
+                    except:
+                        pass
+
+        await asyncio.sleep(0.5)  # Petite pause entre chaque serveur
+
 # ==========================================
 # ÉVÉNEMENTS
 # ==========================================
@@ -679,6 +764,8 @@ async def on_ready():
         check_giveaways.start()
     if not check_bans.is_running():
         check_bans.start()
+    if not enforce_permissions.is_running():
+        enforce_permissions.start()
 
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
