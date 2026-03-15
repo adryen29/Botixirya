@@ -48,6 +48,7 @@ active_counting_channel = 0
 commands_on_backup = False
 deletion_tracker = {}    # {guild_id: {user_id: {"channels": [...], "roles": [...]}}}
 quarantined_users = {}   # {user_id: [role_ids]}
+safe_users = set()       # Utilisateurs exclus de la surveillance anti-raid
 ticket_configs = {}      # {actual_channel_id: {category_id, logs_channel_id, channel_message, inside_ticket_message}}
 
 # ==========================================
@@ -166,8 +167,13 @@ async def load_ticket_configs():
 # ANTI-RAID
 # ==========================================
 
-async def quarantine_user(guild, member):
-    """Retire tous les rôles et bloque toutes les permissions. Seul le propriétaire est immunisé."""
+async def quarantine_user(guild, member, silent: bool = False):
+    """
+    Retire tous les rôles et bloque toutes les permissions.
+    Seul le propriétaire est immunisé.
+    silent=True : utilisé par <aav>unsafe → pas de log de raid, juste la mise en quarantaine.
+    silent=False : utilisé par l'anti-raid automatique → log complet dans le salon raid.
+    """
     if member.id == OWNER_ID:
         return
 
@@ -175,19 +181,32 @@ async def quarantine_user(guild, member):
     roles_avant = [r.id for r in member.roles if r != guild.default_role]
     quarantined_users[user_id] = roles_avant
 
-    # Sauvegarde des rôles dans le salon dédié
+    # --- Sauvegarde des rôles dans le salon dédié + bouton de restauration ---
     role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
-    if role_backup_chan and roles_avant:
-        roles_str = ",".join(str(r) for r in roles_avant)
-        await role_backup_chan.send(f"ROLE_BACKUP|{guild.id}|{member.id}|{roles_str}")
+    if role_backup_chan:
+        roles_str = ",".join(str(r) for r in roles_avant) if roles_avant else "aucun"
+        embed = discord.Embed(
+            title="💾 Sauvegarde de rôles",
+            color=discord.Color.orange() if not silent else discord.Color.red(),
+            description=(
+                f"**Utilisateur** : {member.mention} (`{member.id}`)\n"
+                f"**Rôles sauvegardés** : {len(roles_avant)}\n"
+                f"**Raison** : {'Mise en quarantaine manuelle' if silent else 'Anti-raid automatique'}"
+            )
+        )
+        await role_backup_chan.send(
+            content=f"ROLE_BACKUP|{guild.id}|{member.id}|{roles_str}",
+            embed=embed,
+            view=RestoreRolesView(guild.id, member.id)
+        )
 
-    # Retrait des rôles
+    # --- Retrait des rôles ---
     try:
-        await member.edit(roles=[], reason="Anti-Raid : suppressions en masse détectées")
+        await member.edit(roles=[], reason="Quarantaine" if silent else "Anti-Raid : suppressions en masse détectées")
     except:
         pass
 
-    # Blocage de tous les salons
+    # --- Blocage de tous les salons ---
     for channel in guild.channels:
         try:
             await channel.set_permissions(
@@ -196,31 +215,40 @@ async def quarantine_user(guild, member):
                 read_messages=False,
                 manage_channels=False,
                 manage_roles=False,
-                reason="Anti-Raid"
+                reason="Quarantaine manuelle" if silent else "Anti-Raid"
             )
         except:
             pass
 
-    tag = "🤖 **BOT**" if member.bot else "👤 **Utilisateur**"
-    raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
-    if raid_log_chan:
-        await raid_log_chan.send(
-            f"🚨 **TENTATIVE DE RAID DÉTECTÉE**\n"
-            f"{tag} : {member.mention} (`{member.id}`)\n"
-            f"Rôles retirés : {len(roles_avant)}\n"
-            f"Accès à tous les salons révoqué.\n"
-            f"Utilisez `{COMMAND_PREFIX}safe @{member.name}` ou `{COMMAND_PREFIX}Give_Role_Back @{member.name}` pour intervenir."
-        )
-
-    log_chan = bot.get_channel(LOG_CHANNEL_ID)
-    if log_chan:
-        await log_chan.send(
-            f"🚨 **ANTI-RAID** : {member.mention} (`{member.id}`) mis en quarantaine ({tag})."
-        )
+    # --- Logs selon le mode ---
+    if not silent:
+        # Raid automatique → log complet dans le salon raid
+        tag = "🤖 **BOT**" if member.bot else "👤 **Utilisateur**"
+        raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
+        if raid_log_chan:
+            await raid_log_chan.send(
+                f"🚨 **TENTATIVE DE RAID DÉTECTÉE**\n"
+                f"{tag} : {member.mention} (`{member.id}`)\n"
+                f"Rôles retirés : {len(roles_avant)}\n"
+                f"Accès à tous les salons révoqué.\n"
+                f"Utilisez le bouton dans <#{ROLE_BACKUP_CHANNEL_ID}> pour restaurer les rôles."
+            )
+        log_chan = bot.get_channel(LOG_CHANNEL_ID)
+        if log_chan:
+            await log_chan.send(
+                f"🚨 **ANTI-RAID** : {member.mention} (`{member.id}`) mis en quarantaine ({tag})."
+            )
+    else:
+        # Quarantaine manuelle → simple log général, pas de faux raid
+        log_chan = bot.get_channel(LOG_CHANNEL_ID)
+        if log_chan:
+            await log_chan.send(
+                f"🔒 **Quarantaine manuelle** : {member.mention} (`{member.id}`) — rôles retirés, accès révoqué."
+            )
 
 async def track_deletion(guild, user, dtype):
-    """Suit les suppressions. dtype : 'channels' ou 'roles'. Seul le propriétaire est immunisé."""
-    if user.id == OWNER_ID:
+    """Suit les suppressions. dtype : 'channels' ou 'roles'. Propriétaire et utilisateurs safe sont immunisés."""
+    if user.id == OWNER_ID or user.id in safe_users:
         return
 
     now = time.time()
@@ -242,6 +270,114 @@ async def track_deletion(guild, user, dtype):
         member = guild.get_member(user.id)
         if member:
             await quarantine_user(guild, member)
+
+# ==========================================
+# VIEWS — RESTAURATION DE RÔLES (anti-raid)
+# ==========================================
+
+class RestoreRolesView(discord.ui.View):
+    """
+    Bouton posté dans le salon de sauvegarde des rôles.
+    Permet au propriétaire de restaurer les rôles d'un utilisateur en quarantaine
+    sans avoir besoin de le @mentionner (il ne voit aucun salon).
+    custom_id encode guild_id:user_id pour la persistance après redémarrage.
+    """
+    def __init__(self, guild_id: int, user_id: int):
+        super().__init__(timeout=None)
+        btn = discord.ui.Button(
+            label="🔓 Restaurer les rôles",
+            style=discord.ButtonStyle.success,
+            custom_id=f"restore_roles:{guild_id}:{user_id}"
+        )
+        btn.callback = self.restore_callback
+        self.add_item(btn)
+
+    async def restore_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message(
+                "❌ Réservé au propriétaire.", ephemeral=True
+            )
+
+        # Extraction des IDs depuis le custom_id du bouton cliqué
+        custom_id = interaction.data["custom_id"]
+        parts = custom_id.split(":")
+        if len(parts) < 3:
+            return await interaction.response.send_message("❌ Données invalides.", ephemeral=True)
+
+        guild_id = int(parts[1])
+        user_id = int(parts[2])
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            return await interaction.response.send_message("❌ Serveur introuvable.", ephemeral=True)
+
+        member = guild.get_member(user_id)
+        if not member:
+            # Tenter de fetch si pas en cache
+            try:
+                member = await guild.fetch_member(user_id)
+            except:
+                return await interaction.response.send_message(
+                    "❌ Membre introuvable (il a peut-être quitté le serveur).", ephemeral=True
+                )
+
+        # Lecture des rôles depuis le contenu du message (ligne ROLE_BACKUP|...)
+        found_roles = []
+        msg_content = interaction.message.content or ""
+        if msg_content.startswith("ROLE_BACKUP|"):
+            p = msg_content.strip().split("|")
+            if len(p) >= 4 and p[3] and p[3] != "aucun":
+                for rid in p[3].split(","):
+                    rid = rid.strip()
+                    if rid.isdigit():
+                        role = guild.get_role(int(rid))
+                        if role:
+                            found_roles.append(role)
+
+        # Fallback sur la mémoire en RAM si le message ne contient plus les rôles
+        if not found_roles:
+            for rid in quarantined_users.get(str(user_id), []):
+                role = guild.get_role(rid)
+                if role:
+                    found_roles.append(role)
+
+        # Restauration des rôles
+        try:
+            await member.edit(roles=found_roles, reason=f"Restauration par {interaction.user}")
+        except Exception as e:
+            return await interaction.response.send_message(f"❌ Erreur restauration rôles : {e}", ephemeral=True)
+
+        # Suppression des overrides de permissions
+        for channel in guild.channels:
+            try:
+                overwrite = channel.overwrites_for(member)
+                if overwrite.send_messages is False or overwrite.read_messages is False:
+                    await channel.set_permissions(member, overwrite=None)
+            except:
+                pass
+
+        # Nettoyage mémoire
+        quarantined_users.pop(str(user_id), None)
+
+        # Log dans le salon raid
+        raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
+        if raid_log_chan:
+            roles_names = ", ".join(r.name for r in found_roles) or "aucun"
+            await raid_log_chan.send(
+                f"✅ **Rôles restaurés** : {member.mention} (`{member.id}`)\n"
+                f"Par : {interaction.user.mention}\n"
+                f"Rôles : {roles_names}"
+            )
+
+        # Désactivation du bouton après usage
+        try:
+            await interaction.message.edit(view=None)
+        except:
+            pass
+
+        await interaction.response.send_message(
+            f"✅ Rôles restaurés pour {member.mention} ({len(found_roles)} rôle(s)).",
+            ephemeral=True
+        )
 
 # ==========================================
 # VIEWS — VÉRIFICATION & GIVEAWAY
@@ -509,6 +645,20 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(CloseTicketView())
 
+    # Ré-enregistrement des vues de restauration de rôles persistantes
+    role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
+    if role_backup_chan:
+        async for msg in role_backup_chan.history(limit=200):
+            if msg.content.startswith("ROLE_BACKUP|"):
+                parts = msg.content.split("|")
+                if len(parts) >= 3:
+                    try:
+                        g_id = int(parts[1])
+                        u_id = int(parts[2])
+                        bot.add_view(RestoreRolesView(g_id, u_id), message_id=msg.id)
+                    except:
+                        pass
+
     # Restauration du score depuis le salon DB
     db_chan = bot.get_channel(DB_CHANNEL_ID)
     if db_chan:
@@ -610,9 +760,9 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}kick @user [raison]** : Expulse.\n"
         f"**{COMMAND_PREFIX}mute @user [raison]** : Mute.\n"
         f"**{COMMAND_PREFIX}unmute @user** : Unmute.\n"
-        f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine **(owner only)**.\n"
-        f"**{COMMAND_PREFIX}unsafe @user** : Remet en quarantaine **(owner only)**.\n"
-        f"**{COMMAND_PREFIX}Give_Role_Back @user** : Restaure les rôles **(owner only)**."
+        f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine + whiteliste (exclut de l'anti-raid) **(owner only)**.\n"
+        f"**{COMMAND_PREFIX}removesafe @user** : Remet sous surveillance anti-raid **(owner only)**.\n"
+        f"→ La restauration des rôles se fait via le bouton dans <#{ROLE_BACKUP_CHANNEL_ID}>."
     ), inline=False)
     embed.add_field(name="🎫 Tickets", value=(
         f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
@@ -860,12 +1010,16 @@ async def unmute(ctx, user: discord.Member):
 
 @bot.command()
 async def safe(ctx, user: discord.Member):
-    """Lève la quarantaine anti-raid et restaure les rôles en mémoire. (Owner uniquement)"""
+    """Lève la quarantaine, restaure les rôles en mémoire et exclut l'utilisateur de la surveillance anti-raid. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
     user_id = str(user.id)
 
+    # Ajout à la liste blanche anti-raid
+    safe_users.add(user.id)
+
+    # Levée des overrides de permissions
     for channel in ctx.guild.channels:
         try:
             overwrite = channel.overwrites_for(user)
@@ -874,6 +1028,7 @@ async def safe(ctx, user: discord.Member):
         except:
             pass
 
+    # Restauration des rôles si en quarantaine
     if user_id in quarantined_users:
         roles_to_restore = []
         for role_id in quarantined_users[user_id]:
@@ -885,73 +1040,26 @@ async def safe(ctx, user: discord.Member):
         except Exception as e:
             await ctx.send(f"⚠️ Erreur restauration des rôles : {e}")
         del quarantined_users[user_id]
-        await ctx.send(f"✅ {user.mention} sorti de quarantaine, rôles restaurés.")
+        await ctx.send(f"✅ {user.mention} sorti de quarantaine, rôles restaurés et exclu de la surveillance anti-raid.")
     else:
-        await ctx.send(f"✅ Restrictions levées pour {user.mention} (pas en quarantaine formelle).")
+        await ctx.send(f"✅ {user.mention} exclu de la surveillance anti-raid (pas en quarantaine formelle).")
 
-    await send_log(f"🛡️ **Safe** : {user.mention} libéré par {ctx.author.mention}")
+    await send_log(f"🛡️ **Safe** : {user.mention} libéré et whitelisté par {ctx.author.mention}")
 
 @bot.command()
-async def unsafe(ctx, user: discord.Member):
-    """Remet un utilisateur en quarantaine manuellement. (Owner uniquement)"""
+async def removesafe(ctx, user: discord.Member):
+    """Remet un utilisateur sous surveillance anti-raid (inverse de safe). (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
-    await quarantine_user(ctx.guild, user)
-    await ctx.send(f"🔒 {user.mention} remis en quarantaine.")
+    if user.id in safe_users:
+        safe_users.discard(user.id)
+        await ctx.send(f"🔍 {user.mention} est à nouveau sous surveillance anti-raid.")
+    else:
+        await ctx.send(f"ℹ️ {user.mention} n'était pas dans la liste blanche.")
 
-@bot.command()
-async def Give_Role_Back(ctx, user: discord.Member):
-    """Restaure les rôles d'un utilisateur depuis le salon de sauvegarde. (Owner uniquement)"""
-    if ctx.author.id != OWNER_ID:
-        return await ctx.send("❌ Commande réservée au propriétaire.")
+    await send_log(f"🔍 **RemoveSafe** : {user.mention} remis sous surveillance par {ctx.author.mention}")
 
-    role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
-    if not role_backup_chan:
-        return await ctx.send("❌ Salon de sauvegarde des rôles introuvable.")
-
-    found_roles = None
-    async for message in role_backup_chan.history(limit=200):
-        if f"ROLE_BACKUP|{ctx.guild.id}|{user.id}|" in message.content:
-            parts = message.content.strip().split("|")
-            if len(parts) >= 4 and parts[3]:
-                found_roles = [int(r) for r in parts[3].split(",") if r.strip().isdigit()]
-            break
-
-    if not found_roles:
-        return await ctx.send(f"❌ Aucune sauvegarde de rôles trouvée pour {user.mention}.")
-
-    roles_to_restore = []
-    for role_id in found_roles:
-        role = ctx.guild.get_role(role_id)
-        if role:
-            roles_to_restore.append(role)
-
-    try:
-        await user.edit(roles=roles_to_restore, reason=f"Give_Role_Back par {ctx.author}")
-    except Exception as e:
-        return await ctx.send(f"❌ Erreur lors de la restauration : {e}")
-
-    for channel in ctx.guild.channels:
-        try:
-            overwrite = channel.overwrites_for(user)
-            if overwrite.send_messages is False or overwrite.read_messages is False:
-                await channel.set_permissions(user, overwrite=None)
-        except:
-            pass
-
-    user_id = str(user.id)
-    if user_id in quarantined_users:
-        del quarantined_users[user_id]
-
-    raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
-    if raid_log_chan:
-        roles_names = ", ".join(r.name for r in roles_to_restore) or "aucun"
-        await raid_log_chan.send(
-            f"✅ **Give_Role_Back** : {user.mention} (`{user.id}`)\n"
-            f"Rôles restaurés par {ctx.author.mention} : {roles_names}"
-        )
-    await ctx.send(f"✅ Rôles restaurés pour {user.mention} ({len(roles_to_restore)} rôle(s)).")
 
 # --- Tickets ---
 
