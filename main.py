@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import io
+import uuid
 from flask import Flask
 from threading import Thread
 
@@ -55,7 +56,7 @@ commands_on_backup = False
 deletion_tracker = {}    # {guild_id: {user_id: {"channels": [...], "roles": [...]}}}
 quarantined_users = {}   # {user_id: [role_ids]}
 safe_users = set()       # Utilisateurs exclus de la surveillance anti-raid
-ticket_configs = {}      # {actual_channel_id: {category_id, logs_channel_id, channel_message, inside_ticket_message}}
+ticket_configs = {}      # {ticket_id: {category_id, logs_channel_id, channel_message, inside_ticket_message, actual_channel_id}}
 
 # ==========================================
 
@@ -136,18 +137,19 @@ async def send_log(content):
 async def save_ticket_config(config: dict):
     """
     Sauvegarde une config de ticket dans le salon mémoire.
-    Format : TICKET_CONFIG|<json>
-    Remplace l'entrée existante si l'actual_channel_id est déjà présent.
+    Chaque config a un ticket_id unique — plusieurs configs peuvent coexister
+    dans le même salon ou sur tout le serveur.
+    Remplace uniquement l'entrée ayant le même ticket_id si elle existe déjà.
     """
     mem_chan = bot.get_channel(TICKET_MEMORY_CHANNEL_ID)
     if not mem_chan:
         return
-    # Supprimer l'ancienne entrée pour ce channel si elle existe
+    # Supprimer l'ancienne entrée avec le même ticket_id si elle existe
     async for msg in mem_chan.history(limit=200):
         if msg.content.startswith("TICKET_CONFIG|"):
             try:
                 old = json.loads(msg.content[len("TICKET_CONFIG|"):])
-                if old.get("actual_channel_id") == config["actual_channel_id"]:
+                if old.get("ticket_id") == config["ticket_id"]:
                     await msg.delete()
                     break
             except:
@@ -164,8 +166,8 @@ async def load_ticket_configs():
         if msg.content.startswith("TICKET_CONFIG|"):
             try:
                 config = json.loads(msg.content[len("TICKET_CONFIG|"):])
-                cid = config["actual_channel_id"]
-                ticket_configs[cid] = config
+                tid = config["ticket_id"]
+                ticket_configs[tid] = config
             except:
                 pass
 
@@ -452,15 +454,15 @@ class GiveawayView(discord.ui.View):
 class TicketCreateView(discord.ui.View):
     """
     Vue persistante avec le bouton 'Create Ticket'.
-    Le custom_id encode l'ID du salon de création pour retrouver la config.
+    Le custom_id encode le ticket_id unique pour retrouver la config.
     """
-    def __init__(self, actual_channel_id: int):
+    def __init__(self, ticket_id: str):
         super().__init__(timeout=None)
-        self.actual_channel_id = actual_channel_id
+        self.ticket_id = ticket_id
         btn = discord.ui.Button(
             label="🎫 Create Ticket",
             style=discord.ButtonStyle.blurple,
-            custom_id=f"create_ticket:{actual_channel_id}"
+            custom_id=f"create_ticket:{ticket_id}"
         )
         btn.callback = self.create_ticket_callback
         self.add_item(btn)
@@ -469,16 +471,16 @@ class TicketCreateView(discord.ui.View):
         guild = interaction.guild
         user = interaction.user
 
-        # Récupération de la config via l'ID du salon encodé dans le custom_id
-        channel_id = int(interaction.data["custom_id"].split(":")[1])
-        config = ticket_configs.get(channel_id)
+        # Récupération de la config via le ticket_id encodé dans le custom_id
+        ticket_id = interaction.data["custom_id"].split(":", 1)[1]
+        config = ticket_configs.get(ticket_id)
         if not config:
             return await interaction.response.send_message(
                 "❌ Configuration du ticket introuvable.", ephemeral=True
             )
 
-        # Vérifier si l'utilisateur a déjà un ticket ouvert
-        ticket_channel_name = f"ticket-{user.name.lower().replace(' ', '-')}"
+        # Vérifier si l'utilisateur a déjà un ticket ouvert pour CE système de ticket
+        ticket_channel_name = f"ticket-{ticket_id[:8]}-{user.name.lower().replace(' ', '-')}"
         existing = discord.utils.get(guild.text_channels, name=ticket_channel_name)
         if existing:
             return await interaction.response.send_message(
@@ -494,7 +496,6 @@ class TicketCreateView(discord.ui.View):
             user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
         }
-        # Donner accès aux admins
         for role in guild.roles:
             if role.permissions.administrator:
                 overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -515,7 +516,7 @@ class TicketCreateView(discord.ui.View):
             description=config["inside_ticket_message"],
             color=discord.Color.blurple()
         )
-        embed.set_footer(text=f"Ticket de {user.display_name}")
+        embed.set_footer(text=f"Ticket #{ticket_id[:8]} — {user.display_name}")
         await ticket_channel.send(
             content=f"{user.mention}",
             embed=embed,
@@ -757,8 +758,8 @@ async def on_ready():
 
     # Restauration des configs de tickets + enregistrement des vues persistantes
     await load_ticket_configs()
-    for channel_id, config in ticket_configs.items():
-        bot.add_view(TicketCreateView(channel_id))
+    for ticket_id, config in ticket_configs.items():
+        bot.add_view(TicketCreateView(ticket_id))
 
     if not check_giveaways.is_running():
         check_giveaways.start()
@@ -1186,19 +1187,23 @@ async def TicketCreatingChannel(ctx, *, args):
     if not logs_channel:
         return await ctx.send(f"❌ Salon de logs introuvable avec l'ID `{logs_channel_id}`.")
 
+    # Génération d'un ID unique pour ce système de ticket
+    ticket_id = str(uuid.uuid4())
+
     # Sauvegarde de la config
     config = {
+        "ticket_id": ticket_id,
         "actual_channel_id": actual_channel_id,
         "category_id": category_id,
         "logs_channel_id": logs_channel_id,
         "channel_message": channel_message,
         "inside_ticket_message": inside_ticket_message
     }
-    ticket_configs[actual_channel_id] = config
+    ticket_configs[ticket_id] = config
     await save_ticket_config(config)
 
     # Enregistrement de la vue persistante
-    view = TicketCreateView(actual_channel_id)
+    view = TicketCreateView(ticket_id)
     bot.add_view(view)
 
     # Envoi du message dans le salon cible
@@ -1206,11 +1211,13 @@ async def TicketCreatingChannel(ctx, *, args):
         description=channel_message,
         color=discord.Color.blurple()
     )
+    embed.set_footer(text=f"Système de ticket — ID : {ticket_id[:8]}")
     await actual_channel.send(embed=embed, view=view)
 
     await ctx.send(
         f"✅ Système de tickets configuré dans {actual_channel.mention}.\n"
-        f"Catégorie : `{category.name}` | Logs : {logs_channel.mention}"
+        f"Catégorie : `{category.name}` | Logs : {logs_channel.mention}\n"
+        f"🆔 ID du ticket : `{ticket_id[:8]}`"
     )
 
 # ==========================================
