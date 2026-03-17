@@ -771,13 +771,19 @@ async def enforce_permissions():
 
         await asyncio.sleep(0.5)
 
+async def send_funds_error(msg: str):
+    """Envoie une erreur Roblox Funds dans les logs avec un ping au propriétaire."""
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if channel:
+        await channel.send(f"<@{OWNER_ID}> {msg}")
+
 @tasks.loop(minutes=6)
 async def update_roblox_funds():
     global funds_ugc_message_id, funds_clothing_message_id
 
     cookie = os.getenv("ROBLOX_COOKIE", "")
     if not cookie:
-        await send_log("⚠️ **Roblox Funds** : Variable d'environnement `ROBLOX_COOKIE` manquante.")
+        await send_funds_error("⚠️ **Roblox Funds** : Variable d'environnement `ROBLOX_COOKIE` manquante.")
         return
 
     headers = {
@@ -802,21 +808,13 @@ async def update_roblox_funds():
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as auth_resp:
                 if auth_resp.status == 401:
-                    await send_log(
+                    await send_funds_error(
                         "❌ **Roblox Funds** : Cookie invalide ou expiré (HTTP 401).\n"
                         "Renouvelez la variable `ROBLOX_COOKIE` dans Koyeb."
                     )
                     return
-                elif auth_resp.status == 200:
-                    auth_data = await auth_resp.json()
-                    username = auth_data.get("name", "inconnu")
-                    user_id  = auth_data.get("id", "?")
-                    if not funds_ugc_message_id and not funds_clothing_message_id:
-                        await send_log(
-                            f"✅ **Roblox Funds** : Cookie valide — connecté en tant que `{username}` (`{user_id}`)."
-                        )
         except Exception as e:
-            await send_log(f"⚠️ **Roblox Funds** : Impossible de vérifier le cookie — `{e}`")
+            await send_funds_error(f"⚠️ **Roblox Funds** : Impossible de vérifier le cookie — `{e}`")
             return
 
         # --- Récupération du CSRF token ---
@@ -843,7 +841,7 @@ async def update_roblox_funds():
                         robux = data.get("robux", 0)
                         new_name = f"💵·{label}: {robux:,} Robux".replace(",", " ")
                     elif resp.status == 401:
-                        await send_log(
+                        await send_funds_error(
                             f"⚠️ **Roblox Funds — {label}** : Cookie invalide ou expiré (HTTP 401).\n"
                             f"Renouvelez la variable `ROBLOX_COOKIE` dans Koyeb."
                         )
@@ -857,7 +855,7 @@ async def update_roblox_funds():
                             ) if errors else str(body)
                         except:
                             detail = await resp.text()
-                        await send_log(
+                        await send_funds_error(
                             f"⚠️ **Roblox Funds — {label}** : HTTP 403 sur le groupe `{group_id}`.\n"
                             f"Détail Roblox : `{detail[:400]}`"
                         )
@@ -867,29 +865,29 @@ async def update_roblox_funds():
                             body = await resp.text()
                         except:
                             body = "(corps illisible)"
-                        await send_log(
+                        await send_funds_error(
                             f"⚠️ **Roblox Funds — {label}** : HTTP `{resp.status}` sur le groupe `{group_id}`.\n"
                             f"Détail : `{body[:200]}`"
                         )
                         continue
             except asyncio.TimeoutError:
-                await send_log(
+                await send_funds_error(
                     f"⚠️ **Roblox Funds — {label}** : Timeout (groupe `{group_id}`)."
                 )
                 continue
             except Exception as e:
-                await send_log(f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`")
+                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`")
                 continue
 
             # Mise à jour du nom du salon vocal
             chan = bot.get_channel(channel_id)
             if not chan:
-                await send_log(f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable.")
+                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable.")
                 continue
             try:
                 await chan.edit(name=new_name, reason="Botixirya : mise à jour funds Roblox")
             except Exception as e:
-                await send_log(f"⚠️ **Roblox Funds — {label}** : Impossible de renommer le salon — `{e}`")
+                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Impossible de renommer le salon — `{e}`")
 
 # ==========================================
 # ÉVÉNEMENTS
@@ -1013,9 +1011,6 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}ping** : Affiche la latence.\n"
         f"**{COMMAND_PREFIX}score** : Affiche le score actuel."
     ), inline=False)
-    embed.add_field(name="🎁 Giveaway", value=(
-        f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**"
-    ), inline=False)
 
     if not is_membre or is_owner:
         embed.add_field(name="⚙️ Admin", value=(
@@ -1040,6 +1035,7 @@ async def help(ctx):
     if is_owner:
         embed.add_field(name="👑 Owner", value=(
             f"**{COMMAND_PREFIX}kill** : Éteint le bot.\n"
+            f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]** : Lance un giveaway.\n"
             f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine + whiteliste.\n"
             f"**{COMMAND_PREFIX}removesafe @user** : Remet sous surveillance anti-raid.\n"
             f"→ Restauration des rôles via bouton dans <#{ROLE_BACKUP_CHANNEL_ID}>."
