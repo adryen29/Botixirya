@@ -782,7 +782,9 @@ async def update_roblox_funds():
 
     headers = {
         "Cookie": f".ROBLOSECURITY={cookie}",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://www.roblox.com"
     }
 
     groups = [
@@ -791,6 +793,22 @@ async def update_roblox_funds():
     ]
 
     async with aiohttp.ClientSession() as session:
+
+        # --- Récupération du CSRF token (obligatoire pour l'API Roblox authentifiée) ---
+        csrf_token = None
+        try:
+            async with session.post(
+                "https://auth.roblox.com/v2/logout",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                csrf_token = resp.headers.get("x-csrf-token")
+        except:
+            pass
+
+        if csrf_token:
+            headers["X-CSRF-TOKEN"] = csrf_token
+
         for group_id, channel_id, label, msg_attr in groups:
             url = f"https://economy.roblox.com/v1/groups/{group_id}/currency"
             try:
@@ -807,8 +825,9 @@ async def update_roblox_funds():
                         continue
                     elif resp.status == 403:
                         await send_log(
-                            f"⚠️ **Roblox Funds — {label}** : Accès refusé (HTTP 403).\n"
-                            f"Le compte lié au cookie n'a pas les permissions sur le groupe `{group_id}`."
+                            f"⚠️ **Roblox Funds — {label}** : Accès refusé (HTTP 403) sur le groupe `{group_id}`.\n"
+                            f"Vérifie que le compte a la permission **Spend Group Funds** cochée dans son rôle Roblox "
+                            f"(Paramètres du groupe → Rôles → cocher 'Spend Group Funds')."
                         )
                         continue
                     else:
@@ -824,16 +843,12 @@ async def update_roblox_funds():
                 )
                 continue
             except Exception as e:
-                await send_log(
-                    f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`"
-                )
+                await send_log(f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`")
                 continue
 
             chan = bot.get_channel(channel_id)
             if not chan:
-                await send_log(
-                    f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable."
-                )
+                await send_log(f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable.")
                 continue
 
             current_msg_id = funds_ugc_message_id if msg_attr == "funds_ugc_message_id" else funds_clothing_message_id
