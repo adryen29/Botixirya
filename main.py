@@ -1022,48 +1022,74 @@ async def on_guild_role_delete(role):
 @bot.command()
 async def help(ctx):
     """Affiche la liste des commandes disponibles."""
+@bot.command()
+async def help(ctx):
+    """Affiche la liste des commandes disponibles selon le rôle de l'utilisateur."""
+    user = ctx.author
+    guild = ctx.guild
+
+    # --- Rôles bloqués : Muted, Raider, Unverified ---
+    blocked_role_ids = {MUTED_ROLE_ID, RAIDER_ROLE_ID, ROLE_UNVERIFIED_ID}
+    user_role_ids = {r.id for r in user.roles}
+    if user_role_ids & blocked_role_ids:
+        return  # Silencieux — pas de réponse
+
+    is_owner = (user.id == OWNER_ID)
+    is_membre = (ROLE_VERIFIED_ID in user_role_ids)  # Peu importe ses autres rôles
+
     embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
+
+    # --- Tout le monde (sauf bloqués) ---
     embed.add_field(name="🛡️ Système", value=(
-        f"**{COMMAND_PREFIX}kill** : Éteint le bot.\n"
         f"**{COMMAND_PREFIX}ping** : Affiche la latence.\n"
         f"**{COMMAND_PREFIX}score** : Affiche le score actuel."
-    ), inline=False)
-    embed.add_field(name="⚙️ Admin", value=(
-        f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon de comptage.\n"
-        f"**{COMMAND_PREFIX}setscore [nb]** : Modifie manuellement le score.\n"
-        f"**{COMMAND_PREFIX}lock / unlock** : Verrouille ou déverrouille le salon.\n"
-        f"**{COMMAND_PREFIX}restore** : Recrée le salon actuel."
-    ), inline=False)
-    embed.add_field(name="🔨 Modération", value=(
-        f"**{COMMAND_PREFIX}msgdel [nb] (@user)** : Supprime des messages.\n"
-        f"**{COMMAND_PREFIX}ban @user [min] [raison]** : Bannit (0 = permanent).\n"
-        f"**{COMMAND_PREFIX}pardon @user** : Débannit.\n"
-        f"**{COMMAND_PREFIX}kick @user [raison]** : Expulse.\n"
-        f"**{COMMAND_PREFIX}mute @user [raison]** : Mute.\n"
-        f"**{COMMAND_PREFIX}unmute @user** : Unmute.\n"
-        f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine + whiteliste (exclut de l'anti-raid) **(owner only)**.\n"
-        f"**{COMMAND_PREFIX}removesafe @user** : Remet sous surveillance anti-raid **(owner only)**.\n"
-        f"→ La restauration des rôles se fait via le bouton dans <#{ROLE_BACKUP_CHANNEL_ID}>."
-    ), inline=False)
-    embed.add_field(name="🎫 Tickets", value=(
-        f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
-        f"→ Configure un point de création de tickets dans le salon spécifié."
-    ), inline=False)
-    embed.add_field(name="💰 Tableau de rémunération", value=(
-        f"**{COMMAND_PREFIX}SetTableChannel** : Définit ce salon comme affichage du tableau.\n"
-        f"**{COMMAND_PREFIX}AddTableLine @user [valeur] [profession]** : Ajoute une ligne.\n"
-        f"**{COMMAND_PREFIX}SetTableValue @user [valeur]** : Met à jour la valeur (TotalValue += valeur).\n"
-        f"**{COMMAND_PREFIX}RemoveTableValue @user** : Retire un utilisateur du tableau.\n"
-        f"**{COMMAND_PREFIX}GetTableUserValue @user (colonne)** : Affiche les données d'un utilisateur.\n"
-        f"→ Colonnes : `value`, `total`, `profession`, `time`"
     ), inline=False)
     embed.add_field(name="🎁 Giveaway", value=(
         f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**"
     ), inline=False)
-    embed.add_field(name="💾 Backup", value=(
-        f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
-        f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup *(owner only)*."
-    ), inline=False)
+
+    # --- Visible si la personne N'A PAS le rôle Membre (ou si c'est le owner) ---
+    if not is_membre or is_owner:
+        embed.add_field(name="⚙️ Admin", value=(
+            f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon de comptage.\n"
+            f"**{COMMAND_PREFIX}setscore [nb]** : Modifie manuellement le score.\n"
+            f"**{COMMAND_PREFIX}lock / unlock** : Verrouille ou déverrouille le salon.\n"
+            f"**{COMMAND_PREFIX}restore** : Recrée le salon actuel."
+        ), inline=False)
+        embed.add_field(name="🔨 Modération", value=(
+            f"**{COMMAND_PREFIX}msgdel [nb] (@user)** : Supprime des messages.\n"
+            f"**{COMMAND_PREFIX}ban @user [min] [raison]** : Bannit (0 = permanent).\n"
+            f"**{COMMAND_PREFIX}pardon @user** : Débannit.\n"
+            f"**{COMMAND_PREFIX}kick @user [raison]** : Expulse.\n"
+            f"**{COMMAND_PREFIX}mute @user [raison]** : Mute.\n"
+            f"**{COMMAND_PREFIX}unmute @user** : Unmute."
+        ), inline=False)
+        embed.add_field(name="🎫 Tickets", value=(
+            f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
+            f"→ Configure un point de création de tickets dans le salon spécifié."
+        ), inline=False)
+
+    # --- Owner uniquement ---
+    if is_owner:
+        embed.add_field(name="👑 Owner", value=(
+            f"**{COMMAND_PREFIX}kill** : Éteint le bot.\n"
+            f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine + whiteliste.\n"
+            f"**{COMMAND_PREFIX}removesafe @user** : Remet sous surveillance anti-raid.\n"
+            f"→ Restauration des rôles via bouton dans <#{ROLE_BACKUP_CHANNEL_ID}>."
+        ), inline=False)
+        embed.add_field(name="💰 Tableau de rémunération", value=(
+            f"**{COMMAND_PREFIX}SetTableChannel** : Définit le salon d'affichage.\n"
+            f"**{COMMAND_PREFIX}AddTableLine @user [valeur] [profession]** : Ajoute une ligne.\n"
+            f"**{COMMAND_PREFIX}SetTableValue @user [valeur]** : Met à jour (TotalValue += valeur).\n"
+            f"**{COMMAND_PREFIX}RemoveTableValue @user** : Retire un utilisateur.\n"
+            f"**{COMMAND_PREFIX}GetTableUserValue @user (colonne)** : Affiche les données.\n"
+            f"→ Colonnes : `value`, `total`, `profession`, `time`"
+        ), inline=False)
+        embed.add_field(name="💾 Backup", value=(
+            f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
+            f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup."
+        ), inline=False)
+
     await ctx.send(embed=embed)
 
 # --- Système ---
@@ -1426,9 +1452,10 @@ async def TicketCreatingChannel(ctx, *, args):
 # ==========================================
 
 @bot.command()
-@commands.has_permissions(administrator=True)
 async def SetTableChannel(ctx):
-    """Définit ce salon comme salon d'affichage du tableau de rémunération."""
+    """Définit ce salon comme salon d'affichage du tableau de rémunération. (Owner uniquement)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
     global table_channel_id, table_message_id
     table_channel_id = ctx.channel.id
     table_message_id = None  # Forcer la création d'un nouveau message
@@ -1437,9 +1464,10 @@ async def SetTableChannel(ctx):
     await ctx.send(f"✅ Salon du tableau défini sur {ctx.channel.mention}.")
 
 @bot.command()
-@commands.has_permissions(administrator=True)
 async def AddTableLine(ctx, user: discord.Member, value: float, *, profession: str):
-    """Ajoute une ligne au tableau pour un utilisateur."""
+    """Ajoute une ligne au tableau pour un utilisateur. (Owner uniquement)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
     from datetime import datetime, timezone
     uid = str(user.id)
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")
@@ -1461,12 +1489,10 @@ async def AddTableLine(ctx, user: discord.Member, value: float, *, profession: s
     await ctx.send(f"✅ {user.mention} ajouté au tableau. Valeur : `{value}` | Total : `{value}` | Profession : `{profession}`")
 
 @bot.command()
-@commands.has_permissions(administrator=True)
 async def SetTableValue(ctx, user: discord.Member, value: float):
-    """
-    Met à jour la valeur d'un utilisateur dans le tableau.
-    TotalValue += value (la nouvelle valeur s'ajoute au total cumulé).
-    """
+    """Met à jour la valeur d'un utilisateur dans le tableau. (Owner uniquement)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
     from datetime import datetime, timezone
     uid = str(user.id)
     if uid not in table_data:
@@ -1489,9 +1515,10 @@ async def SetTableValue(ctx, user: discord.Member, value: float):
     )
 
 @bot.command()
-@commands.has_permissions(administrator=True)
 async def RemoveTableValue(ctx, user: discord.Member):
-    """Supprime un utilisateur du tableau."""
+    """Supprime un utilisateur du tableau. (Owner uniquement)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
     uid = str(user.id)
     if uid not in table_data:
         return await ctx.send(f"❌ {user.mention} n'est pas dans le tableau.")
@@ -1503,11 +1530,9 @@ async def RemoveTableValue(ctx, user: discord.Member):
 
 @bot.command()
 async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
-    """
-    Affiche les données d'un utilisateur dans le tableau.
-    Colonnes disponibles : value, total, profession, time
-    Si aucune colonne n'est spécifiée, toute la ligne est affichée.
-    """
+    """Affiche les données d'un utilisateur dans le tableau. (Owner uniquement)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
     uid = str(user.id)
     if uid not in table_data:
         return await ctx.send(f"❌ {user.mention} n'est pas dans le tableau.")
