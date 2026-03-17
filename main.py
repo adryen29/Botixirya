@@ -41,6 +41,7 @@ RAID_LOG_CHANNEL_ID = 1481211696109326466        # Logs des tentatives de raid
 RAIDER_ROLE_ID = 1482735894745186435             # Rôle donné aux raiders
 
 TICKET_MEMORY_CHANNEL_ID = 1482417571549544690   # Mémoire des configs de tickets
+TABLE_LOG_CHANNEL_ID = 1483437540299243670       # Logs/sauvegarde du tableau de rémunération
 
 # --- Rôles et zones à vérifier toutes les 20 minutes ---
 # Rôle non-vérifié : aucun accès sauf la catégorie et le salon ci-dessous
@@ -57,6 +58,9 @@ deletion_tracker = {}    # {guild_id: {user_id: {"channels": [...], "roles": [..
 quarantined_users = {}   # {user_id: [role_ids]}
 safe_users = set()       # Utilisateurs exclus de la surveillance anti-raid
 ticket_configs = {}      # {ticket_id: {category_id, logs_channel_id, channel_message, inside_ticket_message, actual_channel_id}}
+table_data = {}          # {user_id: {profession, value, total_value, last_modified}}
+table_channel_id = None  # Salon où le tableau est affiché
+table_message_id = None  # ID du message du tableau (pour l'éditer)
 
 # ==========================================
 
@@ -170,6 +174,123 @@ async def load_ticket_configs():
                 ticket_configs[tid] = config
             except:
                 pass
+
+# ==========================================
+# SYSTÈME DE TABLEAU DE RÉMUNÉRATION
+# ==========================================
+
+async def save_table_to_log():
+    """Sauvegarde table_data, table_channel_id et table_message_id dans le salon de log."""
+    log_chan = bot.get_channel(TABLE_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+    payload = {
+        "table_channel_id": table_channel_id,
+        "table_message_id": table_message_id,
+        "data": table_data
+    }
+    # Supprimer l'ancienne sauvegarde
+    async for msg in log_chan.history(limit=50):
+        if msg.content.startswith("TABLE_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await log_chan.send(f"TABLE_SAVE|{json.dumps(payload, ensure_ascii=False)}")
+
+async def load_table_from_log():
+    """Charge table_data, table_channel_id et table_message_id depuis le salon de log."""
+    global table_data, table_channel_id, table_message_id
+    log_chan = bot.get_channel(TABLE_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+    async for msg in log_chan.history(limit=50):
+        if msg.content.startswith("TABLE_SAVE|"):
+            try:
+                payload = json.loads(msg.content[len("TABLE_SAVE|"):])
+                table_channel_id = payload.get("table_channel_id")
+                table_message_id = payload.get("table_message_id")
+                table_data = payload.get("data", {})
+            except:
+                pass
+            break
+
+def render_table(guild) -> str:
+    """
+    Génère un tableau ASCII formaté pour Discord (bloc de code).
+    Colonnes : Utilisateur | Profession | Valeur | Total | Dernière màj
+    """
+    if not table_data:
+        return "```\nAucune entrée dans le tableau.\n```"
+
+    # Construction des lignes avec résolution des noms
+    rows = []
+    for uid, entry in table_data.items():
+        member = guild.get_member(int(uid))
+        name = member.display_name if member else f"ID:{uid}"
+        rows.append([
+            name,
+            entry.get("profession", "—"),
+            str(entry.get("value", 0)),
+            str(entry.get("total_value", 0)),
+            entry.get("last_modified", "—")
+        ])
+
+    headers = ["Utilisateur", "Profession", "Valeur", "Total", "Dernière màj"]
+
+    # Calcul des largeurs de colonnes
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+
+    def make_row(cells):
+        return "│ " + " │ ".join(c.ljust(col_widths[i]) for i, c in enumerate(cells)) + " │"
+
+    def make_sep(left, mid, right, fill="─"):
+        return left + (fill * (col_widths[0] + 2)) + "".join(
+            mid + (fill * (w + 2)) for w in col_widths[1:]
+        ) + right
+
+    lines = []
+    lines.append(make_sep("┌", "┬", "┐"))
+    lines.append(make_row(headers))
+    lines.append(make_sep("├", "┼", "┤"))
+    for row in rows:
+        lines.append(make_row(row))
+    lines.append(make_sep("└", "┴", "┘"))
+
+    return "```\n" + "\n".join(lines) + "\n```"
+
+async def refresh_table_message(guild):
+    """Édite ou crée le message du tableau dans le salon configuré."""
+    global table_message_id
+    if not table_channel_id:
+        return
+    chan = bot.get_channel(table_channel_id)
+    if not chan:
+        return
+
+    embed = discord.Embed(
+        title="💰 Tableau de rémunération",
+        description=render_table(guild),
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text=f"Mis à jour le {discord.utils.utcnow().strftime('%d/%m/%Y à %H:%M')} UTC")
+
+    if table_message_id:
+        try:
+            msg = await chan.fetch_message(table_message_id)
+            await msg.edit(embed=embed)
+            return
+        except:
+            pass  # Message supprimé → en recréer un
+
+    # Création d'un nouveau message
+    msg = await chan.send(embed=embed)
+    table_message_id = msg.id
+    await save_table_to_log()
 
 # ==========================================
 # ANTI-RAID
@@ -761,6 +882,9 @@ async def on_ready():
     for ticket_id, config in ticket_configs.items():
         bot.add_view(TicketCreateView(ticket_id))
 
+    # Restauration du tableau de rémunération
+    await load_table_from_log()
+
     if not check_giveaways.is_running():
         check_giveaways.start()
     if not check_bans.is_running():
@@ -855,6 +979,14 @@ async def help(ctx):
     embed.add_field(name="🎫 Tickets", value=(
         f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
         f"→ Configure un point de création de tickets dans le salon spécifié."
+    ), inline=False)
+    embed.add_field(name="💰 Tableau de rémunération", value=(
+        f"**{COMMAND_PREFIX}SetTableChannel** : Définit ce salon comme affichage du tableau.\n"
+        f"**{COMMAND_PREFIX}AddTableLine @user [valeur] [profession]** : Ajoute une ligne.\n"
+        f"**{COMMAND_PREFIX}SetTableValue @user [valeur]** : Met à jour la valeur (TotalValue += valeur).\n"
+        f"**{COMMAND_PREFIX}RemoveTableValue @user** : Retire un utilisateur du tableau.\n"
+        f"**{COMMAND_PREFIX}GetTableUserValue @user (colonne)** : Affiche les données d'un utilisateur.\n"
+        f"→ Colonnes : `value`, `total`, `profession`, `time`"
     ), inline=False)
     embed.add_field(name="🎁 Giveaway", value=(
         f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**"
@@ -1219,6 +1351,125 @@ async def TicketCreatingChannel(ctx, *, args):
         f"Catégorie : `{category.name}` | Logs : {logs_channel.mention}\n"
         f"🆔 ID du ticket : `{ticket_id[:8]}`"
     )
+
+# ==========================================
+# COMMANDES TABLEAU DE RÉMUNÉRATION
+# ==========================================
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def SetTableChannel(ctx):
+    """Définit ce salon comme salon d'affichage du tableau de rémunération."""
+    global table_channel_id, table_message_id
+    table_channel_id = ctx.channel.id
+    table_message_id = None  # Forcer la création d'un nouveau message
+    await save_table_to_log()
+    await refresh_table_message(ctx.guild)
+    await ctx.send(f"✅ Salon du tableau défini sur {ctx.channel.mention}.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def AddTableLine(ctx, user: discord.Member, value: float, *, profession: str):
+    """Ajoute une ligne au tableau pour un utilisateur."""
+    from datetime import datetime, timezone
+    uid = str(user.id)
+    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")
+
+    if uid in table_data:
+        return await ctx.send(
+            f"❌ {user.mention} est déjà dans le tableau. "
+            f"Utilisez `{COMMAND_PREFIX}SetTableValue` pour modifier sa valeur."
+        )
+
+    table_data[uid] = {
+        "profession": profession,
+        "value": value,
+        "total_value": value,
+        "last_modified": now
+    }
+    await save_table_to_log()
+    await refresh_table_message(ctx.guild)
+    await ctx.send(f"✅ {user.mention} ajouté au tableau. Valeur : `{value}` | Total : `{value}` | Profession : `{profession}`")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def SetTableValue(ctx, user: discord.Member, value: float):
+    """
+    Met à jour la valeur d'un utilisateur dans le tableau.
+    TotalValue += value (la nouvelle valeur s'ajoute au total cumulé).
+    """
+    from datetime import datetime, timezone
+    uid = str(user.id)
+    if uid not in table_data:
+        return await ctx.send(
+            f"❌ {user.mention} n'est pas dans le tableau. "
+            f"Utilisez `{COMMAND_PREFIX}AddTableLine` pour l'ajouter."
+        )
+
+    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")
+    old_total = table_data[uid]["total_value"]
+    table_data[uid]["value"] = value
+    table_data[uid]["total_value"] = round(old_total + value, 2)
+    table_data[uid]["last_modified"] = now
+
+    await save_table_to_log()
+    await refresh_table_message(ctx.guild)
+    await ctx.send(
+        f"✅ Valeur mise à jour pour {user.mention}.\n"
+        f"Nouvelle valeur : `{value}` | Nouveau total : `{table_data[uid]['total_value']}`"
+    )
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def RemoveTableValue(ctx, user: discord.Member):
+    """Supprime un utilisateur du tableau."""
+    uid = str(user.id)
+    if uid not in table_data:
+        return await ctx.send(f"❌ {user.mention} n'est pas dans le tableau.")
+
+    del table_data[uid]
+    await save_table_to_log()
+    await refresh_table_message(ctx.guild)
+    await ctx.send(f"✅ {user.mention} retiré du tableau.")
+
+@bot.command()
+async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
+    """
+    Affiche les données d'un utilisateur dans le tableau.
+    Colonnes disponibles : value, total, profession, time
+    Si aucune colonne n'est spécifiée, toute la ligne est affichée.
+    """
+    uid = str(user.id)
+    if uid not in table_data:
+        return await ctx.send(f"❌ {user.mention} n'est pas dans le tableau.")
+
+    entry = table_data[uid]
+
+    if column is None:
+        embed = discord.Embed(
+            title=f"📋 Données de {user.display_name}",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="Profession", value=entry.get("profession", "—"), inline=True)
+        embed.add_field(name="Valeur actuelle", value=str(entry.get("value", 0)), inline=True)
+        embed.add_field(name="Total cumulé", value=str(entry.get("total_value", 0)), inline=True)
+        embed.add_field(name="Dernière màj", value=entry.get("last_modified", "—"), inline=True)
+        embed.set_thumbnail(url=user.display_avatar.url)
+        await ctx.send(embed=embed)
+    else:
+        col_map = {
+            "value": ("Valeur actuelle", str(entry.get("value", 0))),
+            "total": ("Total cumulé", str(entry.get("total_value", 0))),
+            "profession": ("Profession", entry.get("profession", "—")),
+            "time": ("Dernière màj", entry.get("last_modified", "—"))
+        }
+        col = column.lower()
+        if col not in col_map:
+            return await ctx.send(
+                f"❌ Colonne inconnue. Colonnes disponibles : `value`, `total`, `profession`, `time`"
+            )
+        label, val = col_map[col]
+        await ctx.send(f"📋 **{user.display_name}** — {label} : `{val}`")
 
 # ==========================================
 # COMMANDES BACKUP SERVER
