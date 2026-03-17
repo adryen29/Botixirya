@@ -771,7 +771,7 @@ async def enforce_permissions():
 
         await asyncio.sleep(0.5)
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=6)
 async def update_roblox_funds():
     global funds_ugc_message_id, funds_clothing_message_id
 
@@ -841,7 +841,7 @@ async def update_roblox_funds():
                     if resp.status == 200:
                         data = await resp.json()
                         robux = data.get("robux", 0)
-                        display = f"💵·{label} {robux:,} Robux".replace(",", " ")
+                        new_name = f"💵·{label}: {robux:,} Robux".replace(",", " ")
                     elif resp.status == 401:
                         await send_log(
                             f"⚠️ **Roblox Funds — {label}** : Cookie invalide ou expiré (HTTP 401).\n"
@@ -849,7 +849,6 @@ async def update_roblox_funds():
                         )
                         continue
                     elif resp.status == 403:
-                        # Lecture du corps pour avoir le vrai message Roblox
                         try:
                             body = await resp.json()
                             errors = body.get("errors", [])
@@ -882,32 +881,15 @@ async def update_roblox_funds():
                 await send_log(f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`")
                 continue
 
+            # Mise à jour du nom du salon vocal
             chan = bot.get_channel(channel_id)
             if not chan:
                 await send_log(f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable.")
                 continue
-
-            current_msg_id = funds_ugc_message_id if msg_attr == "funds_ugc_message_id" else funds_clothing_message_id
-
-            if current_msg_id:
-                try:
-                    msg = await chan.fetch_message(current_msg_id)
-                    await msg.edit(content=display)
-                    continue
-                except discord.NotFound:
-                    pass
-                except Exception as e:
-                    await send_log(f"⚠️ **Roblox Funds — {label}** : Impossible d'éditer le message — `{e}`")
-                    continue
-
             try:
-                msg = await chan.send(display)
-                if msg_attr == "funds_ugc_message_id":
-                    funds_ugc_message_id = msg.id
-                else:
-                    funds_clothing_message_id = msg.id
+                await chan.edit(name=new_name, reason="Botixirya : mise à jour funds Roblox")
             except Exception as e:
-                await send_log(f"⚠️ **Roblox Funds — {label}** : Impossible d'envoyer le message — `{e}`")
+                await send_log(f"⚠️ **Roblox Funds — {label}** : Impossible de renommer le salon — `{e}`")
 
 # ==========================================
 # ÉVÉNEMENTS
