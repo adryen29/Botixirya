@@ -9,6 +9,7 @@ import re
 import sys
 import io
 import uuid
+import aiohttp
 from flask import Flask
 from threading import Thread
 
@@ -43,6 +44,12 @@ RAIDER_ROLE_ID = 1482735894745186435             # Rôle donné aux raiders
 TICKET_MEMORY_CHANNEL_ID = 1482417571549544690   # Mémoire des configs de tickets
 TABLE_LOG_CHANNEL_ID = 1483437540299243670       # Logs/sauvegarde du tableau de rémunération
 
+# --- Roblox Group Funds ---
+ROBLOX_GROUP_UGC = 35515170                      # Groupe Aavixyria UGC
+ROBLOX_GROUP_CLOTHING = 16522178                 # Groupe Aavixyria Clothing
+FUNDS_UGC_CHANNEL_ID = 1483505991994835057       # Salon funds UGC
+FUNDS_CLOTHING_CHANNEL_ID = 1483508939504091187  # Salon funds Clothing
+
 # --- Rôles et zones à vérifier toutes les 20 minutes ---
 # Rôle non-vérifié : aucun accès sauf la catégorie et le salon ci-dessous
 PERM_UNVERIFIED_EXCEPTION_CATEGORY = 1478663941168037898
@@ -61,6 +68,9 @@ ticket_configs = {}      # {ticket_id: {category_id, logs_channel_id, channel_me
 table_data = {}          # {user_id: {profession, value, total_value, last_modified}}
 table_channel_id = None  # Salon où le tableau est affiché
 table_message_id = None  # ID du message du tableau (pour l'éditer)
+funds_message_id = None  # ID du message funds Roblox (pour l'éditer)
+funds_ugc_message_id = None       # ID du message funds UGC
+funds_clothing_message_id = None  # ID du message funds Clothing
 
 # ==========================================
 
@@ -841,6 +851,63 @@ async def enforce_permissions():
 
         await asyncio.sleep(0.5)  # Petite pause entre chaque serveur
 
+@tasks.loop(minutes=5)
+async def update_roblox_funds():
+    """
+    Toutes les 5 minutes, récupère les funds de chaque groupe Roblox
+    et met à jour les deux salons dédiés séparément.
+    """
+    global funds_ugc_message_id, funds_clothing_message_id
+
+    cookie = os.getenv("ROBLOX_COOKIE", "")
+    if not cookie:
+        return
+
+    headers = {
+        "Cookie": f".ROBLOSECURITY={cookie}",
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    groups = [
+        (ROBLOX_GROUP_UGC,      FUNDS_UGC_CHANNEL_ID,      "Aavixyria UGC",      "funds_ugc_message_id"),
+        (ROBLOX_GROUP_CLOTHING, FUNDS_CLOTHING_CHANNEL_ID, "Aavixyria Clothing", "funds_clothing_message_id"),
+    ]
+
+    async with aiohttp.ClientSession() as session:
+        for group_id, channel_id, label, msg_attr in groups:
+            url = f"https://economy.roblox.com/v1/groups/{group_id}/currency"
+            try:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        robux = data.get("robux", 0)
+                        display = f"💵·{label} {robux:,} Robux".replace(",", " ")
+                    else:
+                        display = f"💵·{label} ⚠️ HTTP {resp.status}"
+            except Exception as e:
+                display = f"💵·{label} ⚠️ Erreur : {e}"
+
+            chan = bot.get_channel(channel_id)
+            if not chan:
+                continue
+
+            current_msg_id = funds_ugc_message_id if msg_attr == "funds_ugc_message_id" else funds_clothing_message_id
+
+            if current_msg_id:
+                try:
+                    msg = await chan.fetch_message(current_msg_id)
+                    await msg.edit(content=display)
+                    continue
+                except:
+                    pass
+
+            # Création d'un nouveau message si introuvable
+            msg = await chan.send(display)
+            if msg_attr == "funds_ugc_message_id":
+                funds_ugc_message_id = msg.id
+            else:
+                funds_clothing_message_id = msg.id
+
 # ==========================================
 # ÉVÉNEMENTS
 # ==========================================
@@ -891,6 +958,8 @@ async def on_ready():
         check_bans.start()
     if not enforce_permissions.is_running():
         enforce_permissions.start()
+    if not update_roblox_funds.is_running():
+        update_roblox_funds.start()
 
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
@@ -905,13 +974,13 @@ async def on_message(message):
         if content.isdigit():
             number = int(content)
             if number == current_count + 1 and message.author.id != last_user_id:
+                # Bon nombre, bonne personne
                 current_count = number
                 last_user_id = message.author.id
                 await save_counting_to_db()
                 await message.add_reaction("✅")
-            elif number <= current_count:
-                return
             else:
+                # Tout nombre incorrect (trop bas, trop haut, même personne) → reset
                 current_count = 0
                 last_user_id = None
                 await save_counting_to_db()
