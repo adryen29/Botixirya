@@ -794,7 +794,32 @@ async def update_roblox_funds():
 
     async with aiohttp.ClientSession() as session:
 
-        # --- Récupération du CSRF token (obligatoire pour l'API Roblox authentifiée) ---
+        # --- Vérification que le cookie est valide ---
+        try:
+            async with session.get(
+                "https://users.roblox.com/v1/users/authenticated",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as auth_resp:
+                if auth_resp.status == 401:
+                    await send_log(
+                        "❌ **Roblox Funds** : Cookie invalide ou expiré (HTTP 401).\n"
+                        "Renouvelez la variable `ROBLOX_COOKIE` dans Koyeb."
+                    )
+                    return
+                elif auth_resp.status == 200:
+                    auth_data = await auth_resp.json()
+                    username = auth_data.get("name", "inconnu")
+                    user_id  = auth_data.get("id", "?")
+                    if not funds_ugc_message_id and not funds_clothing_message_id:
+                        await send_log(
+                            f"✅ **Roblox Funds** : Cookie valide — connecté en tant que `{username}` (`{user_id}`)."
+                        )
+        except Exception as e:
+            await send_log(f"⚠️ **Roblox Funds** : Impossible de vérifier le cookie — `{e}`")
+            return
+
+        # --- Récupération du CSRF token ---
         csrf_token = None
         try:
             async with session.post(
@@ -824,22 +849,33 @@ async def update_roblox_funds():
                         )
                         continue
                     elif resp.status == 403:
+                        # Lecture du corps pour avoir le vrai message Roblox
+                        try:
+                            body = await resp.json()
+                            errors = body.get("errors", [])
+                            detail = ", ".join(
+                                f"code {e.get('code')} : {e.get('message')}" for e in errors
+                            ) if errors else str(body)
+                        except:
+                            detail = await resp.text()
                         await send_log(
-                            f"⚠️ **Roblox Funds — {label}** : Accès refusé (HTTP 403) sur le groupe `{group_id}`.\n"
-                            f"Vérifie que le compte a la permission **Spend Group Funds** cochée dans son rôle Roblox "
-                            f"(Paramètres du groupe → Rôles → cocher 'Spend Group Funds')."
+                            f"⚠️ **Roblox Funds — {label}** : HTTP 403 sur le groupe `{group_id}`.\n"
+                            f"Détail Roblox : `{detail[:400]}`"
                         )
                         continue
                     else:
+                        try:
+                            body = await resp.text()
+                        except:
+                            body = "(corps illisible)"
                         await send_log(
-                            f"⚠️ **Roblox Funds — {label}** : Réponse inattendue HTTP `{resp.status}` "
-                            f"pour le groupe `{group_id}`."
+                            f"⚠️ **Roblox Funds — {label}** : HTTP `{resp.status}` sur le groupe `{group_id}`.\n"
+                            f"Détail : `{body[:200]}`"
                         )
                         continue
             except asyncio.TimeoutError:
                 await send_log(
-                    f"⚠️ **Roblox Funds — {label}** : Timeout — l'API Roblox ne répond pas "
-                    f"(groupe `{group_id}`)."
+                    f"⚠️ **Roblox Funds — {label}** : Timeout (groupe `{group_id}`)."
                 )
                 continue
             except Exception as e:
