@@ -777,6 +777,7 @@ async def update_roblox_funds():
 
     cookie = os.getenv("ROBLOX_COOKIE", "")
     if not cookie:
+        await send_log("⚠️ **Roblox Funds** : Variable d'environnement `ROBLOX_COOKIE` manquante.")
         return
 
     headers = {
@@ -798,13 +799,41 @@ async def update_roblox_funds():
                         data = await resp.json()
                         robux = data.get("robux", 0)
                         display = f"💵·{label} {robux:,} Robux".replace(",", " ")
+                    elif resp.status == 401:
+                        await send_log(
+                            f"⚠️ **Roblox Funds — {label}** : Cookie invalide ou expiré (HTTP 401).\n"
+                            f"Renouvelez la variable `ROBLOX_COOKIE` dans Koyeb."
+                        )
+                        continue
+                    elif resp.status == 403:
+                        await send_log(
+                            f"⚠️ **Roblox Funds — {label}** : Accès refusé (HTTP 403).\n"
+                            f"Le compte lié au cookie n'a pas les permissions sur le groupe `{group_id}`."
+                        )
+                        continue
                     else:
-                        display = f"💵·{label} ⚠️ HTTP {resp.status}"
+                        await send_log(
+                            f"⚠️ **Roblox Funds — {label}** : Réponse inattendue HTTP `{resp.status}` "
+                            f"pour le groupe `{group_id}`."
+                        )
+                        continue
+            except asyncio.TimeoutError:
+                await send_log(
+                    f"⚠️ **Roblox Funds — {label}** : Timeout — l'API Roblox ne répond pas "
+                    f"(groupe `{group_id}`)."
+                )
+                continue
             except Exception as e:
-                display = f"💵·{label} ⚠️ Erreur : {e}"
+                await send_log(
+                    f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`"
+                )
+                continue
 
             chan = bot.get_channel(channel_id)
             if not chan:
+                await send_log(
+                    f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable."
+                )
                 continue
 
             current_msg_id = funds_ugc_message_id if msg_attr == "funds_ugc_message_id" else funds_clothing_message_id
@@ -814,14 +843,20 @@ async def update_roblox_funds():
                     msg = await chan.fetch_message(current_msg_id)
                     await msg.edit(content=display)
                     continue
-                except:
+                except discord.NotFound:
                     pass
+                except Exception as e:
+                    await send_log(f"⚠️ **Roblox Funds — {label}** : Impossible d'éditer le message — `{e}`")
+                    continue
 
-            msg = await chan.send(display)
-            if msg_attr == "funds_ugc_message_id":
-                funds_ugc_message_id = msg.id
-            else:
-                funds_clothing_message_id = msg.id
+            try:
+                msg = await chan.send(display)
+                if msg_attr == "funds_ugc_message_id":
+                    funds_ugc_message_id = msg.id
+                else:
+                    funds_clothing_message_id = msg.id
+            except Exception as e:
+                await send_log(f"⚠️ **Roblox Funds — {label}** : Impossible d'envoyer le message — `{e}`")
 
 # ==========================================
 # ÉVÉNEMENTS
