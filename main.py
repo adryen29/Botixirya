@@ -51,7 +51,6 @@ FUNDS_UGC_CHANNEL_ID = 1483505991994835057       # Salon funds UGC
 FUNDS_CLOTHING_CHANNEL_ID = 1483508939504091187  # Salon funds Clothing
 
 # --- Rôles et zones à vérifier toutes les 20 minutes ---
-# Rôle non-vérifié : aucun accès sauf la catégorie et le salon ci-dessous
 PERM_UNVERIFIED_EXCEPTION_CATEGORY = 1478663941168037898
 PERM_UNVERIFIED_EXCEPTION_CHANNEL = 1478669348989177997
 # ==========================================
@@ -61,16 +60,15 @@ current_count = 0
 last_user_id = None
 active_counting_channel = 0
 commands_on_backup = False
-deletion_tracker = {}    # {guild_id: {user_id: {"channels": [...], "roles": [...]}}}
-quarantined_users = {}   # {user_id: [role_ids]}
-safe_users = set()       # Utilisateurs exclus de la surveillance anti-raid
-ticket_configs = {}      # {ticket_id: {category_id, logs_channel_id, channel_message, inside_ticket_message, actual_channel_id}}
-table_data = {}          # {user_id: {profession, value, total_value, last_modified}}
-table_channel_id = None  # Salon où le tableau est affiché
-table_message_id = None  # ID du message du tableau (pour l'éditer)
-funds_message_id = None  # ID du message funds Roblox (pour l'éditer)
-funds_ugc_message_id = None       # ID du message funds UGC
-funds_clothing_message_id = None  # ID du message funds Clothing
+deletion_tracker = {}
+quarantined_users = {}
+safe_users = set()
+ticket_configs = {}
+table_data = {}
+table_channel_id = None
+table_message_id = None
+funds_ugc_message_id = None
+funds_clothing_message_id = None
 
 # ==========================================
 
@@ -92,11 +90,11 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
+bot.remove_command('help')
 
 # --- Vérification globale : serveur backup ---
 @bot.check
 async def global_backup_check(ctx):
-    """Bloque toutes les commandes sur le serveur backup sauf backup et COMMANDSON."""
     if ctx.guild and ctx.guild.id == BACKUP_SERVER_ID:
         if ctx.command and ctx.command.name in ('backup', 'COMMANDSON'):
             return True
@@ -134,7 +132,6 @@ def save_bans(data):
         json.dump(data, f, indent=4)
 
 async def save_counting_to_db():
-    """Sauvegarde le score dans le salon DB Discord."""
     db_chan = bot.get_channel(DB_CHANNEL_ID)
     if db_chan:
         await db_chan.send(f"BACKUP_COUNT|{current_count}|{last_user_id}|{active_counting_channel}")
@@ -149,16 +146,9 @@ async def send_log(content):
 # ==========================================
 
 async def save_ticket_config(config: dict):
-    """
-    Sauvegarde une config de ticket dans le salon mémoire.
-    Chaque config a un ticket_id unique — plusieurs configs peuvent coexister
-    dans le même salon ou sur tout le serveur.
-    Remplace uniquement l'entrée ayant le même ticket_id si elle existe déjà.
-    """
     mem_chan = bot.get_channel(TICKET_MEMORY_CHANNEL_ID)
     if not mem_chan:
         return
-    # Supprimer l'ancienne entrée avec le même ticket_id si elle existe
     async for msg in mem_chan.history(limit=200):
         if msg.content.startswith("TICKET_CONFIG|"):
             try:
@@ -171,7 +161,6 @@ async def save_ticket_config(config: dict):
     await mem_chan.send(f"TICKET_CONFIG|{json.dumps(config, ensure_ascii=False)}")
 
 async def load_ticket_configs():
-    """Charge toutes les configs de tickets depuis le salon mémoire au démarrage."""
     global ticket_configs
     mem_chan = bot.get_channel(TICKET_MEMORY_CHANNEL_ID)
     if not mem_chan:
@@ -190,7 +179,6 @@ async def load_ticket_configs():
 # ==========================================
 
 async def save_table_to_log():
-    """Sauvegarde table_data, table_channel_id et table_message_id dans le salon de log."""
     log_chan = bot.get_channel(TABLE_LOG_CHANNEL_ID)
     if not log_chan:
         return
@@ -199,7 +187,6 @@ async def save_table_to_log():
         "table_message_id": table_message_id,
         "data": table_data
     }
-    # Supprimer l'ancienne sauvegarde
     async for msg in log_chan.history(limit=50):
         if msg.content.startswith("TABLE_SAVE|"):
             try:
@@ -210,7 +197,6 @@ async def save_table_to_log():
     await log_chan.send(f"TABLE_SAVE|{json.dumps(payload, ensure_ascii=False)}")
 
 async def load_table_from_log():
-    """Charge table_data, table_channel_id et table_message_id depuis le salon de log."""
     global table_data, table_channel_id, table_message_id
     log_chan = bot.get_channel(TABLE_LOG_CHANNEL_ID)
     if not log_chan:
@@ -227,14 +213,9 @@ async def load_table_from_log():
             break
 
 def render_table(guild) -> str:
-    """
-    Génère un tableau ASCII formaté pour Discord (bloc de code).
-    Colonnes : Utilisateur | Profession | Valeur | Total | Dernière màj
-    """
     if not table_data:
         return "```\nAucune entrée dans le tableau.\n```"
 
-    # Construction des lignes avec résolution des noms
     rows = []
     for uid, entry in table_data.items():
         member = guild.get_member(int(uid))
@@ -248,8 +229,6 @@ def render_table(guild) -> str:
         ])
 
     headers = ["Utilisateur", "Profession", "Valeur", "Total", "Dernière màj"]
-
-    # Calcul des largeurs de colonnes
     col_widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
@@ -274,7 +253,6 @@ def render_table(guild) -> str:
     return "```\n" + "\n".join(lines) + "\n```"
 
 async def refresh_table_message(guild):
-    """Édite ou crée le message du tableau dans le salon configuré."""
     global table_message_id
     if not table_channel_id:
         return
@@ -295,9 +273,8 @@ async def refresh_table_message(guild):
             await msg.edit(embed=embed)
             return
         except:
-            pass  # Message supprimé → en recréer un
+            pass
 
-    # Création d'un nouveau message
     msg = await chan.send(embed=embed)
     table_message_id = msg.id
     await save_table_to_log()
@@ -307,12 +284,6 @@ async def refresh_table_message(guild):
 # ==========================================
 
 async def quarantine_user(guild, member, silent: bool = False):
-    """
-    Retire tous les rôles et bloque toutes les permissions.
-    Seul le propriétaire est immunisé.
-    silent=True : utilisé par <aav>unsafe → pas de log de raid, juste la mise en quarantaine.
-    silent=False : utilisé par l'anti-raid automatique → log complet dans le salon raid.
-    """
     if member.id == OWNER_ID:
         return
 
@@ -320,7 +291,6 @@ async def quarantine_user(guild, member, silent: bool = False):
     roles_avant = [r.id for r in member.roles if r != guild.default_role]
     quarantined_users[user_id] = roles_avant
 
-    # --- Sauvegarde des rôles dans le salon dédié + bouton de restauration ---
     role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
     if role_backup_chan:
         roles_str = ",".join(str(r) for r in roles_avant) if roles_avant else "aucun"
@@ -339,7 +309,6 @@ async def quarantine_user(guild, member, silent: bool = False):
             view=RestoreRolesView(guild.id, member.id)
         )
 
-    # --- Retrait des rôles + attribution du rôle Raider ---
     raider_role = guild.get_role(RAIDER_ROLE_ID)
     try:
         new_roles = [raider_role] if raider_role else []
@@ -347,7 +316,6 @@ async def quarantine_user(guild, member, silent: bool = False):
     except:
         pass
 
-    # --- Blocage de tous les salons ---
     for channel in guild.channels:
         try:
             await channel.set_permissions(
@@ -361,9 +329,7 @@ async def quarantine_user(guild, member, silent: bool = False):
         except:
             pass
 
-    # --- Logs selon le mode ---
     if not silent:
-        # Raid automatique → log complet dans le salon raid
         tag = "🤖 **BOT**" if member.bot else "👤 **Utilisateur**"
         raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
         if raid_log_chan:
@@ -380,7 +346,6 @@ async def quarantine_user(guild, member, silent: bool = False):
                 f"🚨 **ANTI-RAID** : {member.mention} (`{member.id}`) mis en quarantaine ({tag})."
             )
     else:
-        # Quarantaine manuelle → simple log général, pas de faux raid
         log_chan = bot.get_channel(LOG_CHANNEL_ID)
         if log_chan:
             await log_chan.send(
@@ -388,7 +353,6 @@ async def quarantine_user(guild, member, silent: bool = False):
             )
 
 async def track_deletion(guild, user, dtype):
-    """Suit les suppressions. dtype : 'channels' ou 'roles'. Propriétaire et utilisateurs safe sont immunisés."""
     if user.id == OWNER_ID or user.id in safe_users:
         return
 
@@ -417,12 +381,6 @@ async def track_deletion(guild, user, dtype):
 # ==========================================
 
 class RestoreRolesView(discord.ui.View):
-    """
-    Bouton posté dans le salon de sauvegarde des rôles.
-    Permet au propriétaire de restaurer les rôles d'un utilisateur en quarantaine
-    sans avoir besoin de le @mentionner (il ne voit aucun salon).
-    custom_id encode guild_id:user_id pour la persistance après redémarrage.
-    """
     def __init__(self, guild_id: int, user_id: int):
         super().__init__(timeout=None)
         btn = discord.ui.Button(
@@ -435,11 +393,8 @@ class RestoreRolesView(discord.ui.View):
 
     async def restore_callback(self, interaction: discord.Interaction):
         if interaction.user.id != OWNER_ID:
-            return await interaction.response.send_message(
-                "❌ Réservé au propriétaire.", ephemeral=True
-            )
+            return await interaction.response.send_message("❌ Réservé au propriétaire.", ephemeral=True)
 
-        # Extraction des IDs depuis le custom_id du bouton cliqué
         custom_id = interaction.data["custom_id"]
         parts = custom_id.split(":")
         if len(parts) < 3:
@@ -453,7 +408,6 @@ class RestoreRolesView(discord.ui.View):
 
         member = guild.get_member(user_id)
         if not member:
-            # Tenter de fetch si pas en cache
             try:
                 member = await guild.fetch_member(user_id)
             except:
@@ -461,7 +415,6 @@ class RestoreRolesView(discord.ui.View):
                     "❌ Membre introuvable (il a peut-être quitté le serveur).", ephemeral=True
                 )
 
-        # Lecture des rôles depuis le contenu du message (ligne ROLE_BACKUP|...)
         found_roles = []
         msg_content = interaction.message.content or ""
         if msg_content.startswith("ROLE_BACKUP|"):
@@ -474,20 +427,17 @@ class RestoreRolesView(discord.ui.View):
                         if role:
                             found_roles.append(role)
 
-        # Fallback sur la mémoire en RAM si le message ne contient plus les rôles
         if not found_roles:
             for rid in quarantined_users.get(str(user_id), []):
                 role = guild.get_role(rid)
                 if role:
                     found_roles.append(role)
 
-        # Restauration des rôles
         try:
             await member.edit(roles=found_roles, reason=f"Restauration par {interaction.user}")
         except Exception as e:
             return await interaction.response.send_message(f"❌ Erreur restauration rôles : {e}", ephemeral=True)
 
-        # Suppression des overrides de permissions
         for channel in guild.channels:
             try:
                 overwrite = channel.overwrites_for(member)
@@ -496,10 +446,8 @@ class RestoreRolesView(discord.ui.View):
             except:
                 pass
 
-        # Nettoyage mémoire
         quarantined_users.pop(str(user_id), None)
 
-        # Log dans le salon raid
         raid_log_chan = bot.get_channel(RAID_LOG_CHANNEL_ID)
         if raid_log_chan:
             roles_names = ", ".join(r.name for r in found_roles) or "aucun"
@@ -509,7 +457,6 @@ class RestoreRolesView(discord.ui.View):
                 f"Rôles : {roles_names}"
             )
 
-        # Désactivation du bouton après usage
         try:
             await interaction.message.edit(view=None)
         except:
@@ -583,10 +530,6 @@ class GiveawayView(discord.ui.View):
 # ==========================================
 
 class TicketCreateView(discord.ui.View):
-    """
-    Vue persistante avec le bouton 'Create Ticket'.
-    Le custom_id encode le ticket_id unique pour retrouver la config.
-    """
     def __init__(self, ticket_id: str):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
@@ -602,7 +545,6 @@ class TicketCreateView(discord.ui.View):
         guild = interaction.guild
         user = interaction.user
 
-        # Récupération de la config via le ticket_id encodé dans le custom_id
         ticket_id = interaction.data["custom_id"].split(":", 1)[1]
         config = ticket_configs.get(ticket_id)
         if not config:
@@ -610,7 +552,6 @@ class TicketCreateView(discord.ui.View):
                 "❌ Configuration du ticket introuvable.", ephemeral=True
             )
 
-        # Vérifier si l'utilisateur a déjà un ticket ouvert pour CE système de ticket
         ticket_channel_name = f"ticket-{ticket_id[:8]}-{user.name.lower().replace(' ', '-')}"
         existing = discord.utils.get(guild.text_channels, name=ticket_channel_name)
         if existing:
@@ -618,10 +559,8 @@ class TicketCreateView(discord.ui.View):
                 f"❌ Tu as déjà un ticket ouvert : {existing.mention}", ephemeral=True
             )
 
-        # Catégorie cible
         category = guild.get_channel(config["category_id"])
 
-        # Création du salon ticket avec permissions restreintes
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
@@ -642,7 +581,6 @@ class TicketCreateView(discord.ui.View):
         except Exception as e:
             return await interaction.response.send_message(f"❌ Erreur création ticket : {e}", ephemeral=True)
 
-        # Message d'accueil dans le ticket
         embed = discord.Embed(
             description=config["inside_ticket_message"],
             color=discord.Color.blurple()
@@ -660,7 +598,6 @@ class TicketCreateView(discord.ui.View):
 
 
 class CloseTicketView(discord.ui.View):
-    """Vue persistante avec le bouton 'Close Ticket'."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -670,7 +607,6 @@ class CloseTicketView(discord.ui.View):
         guild = interaction.guild
         user = interaction.user
 
-        # Lecture des infos depuis le topic du salon
         topic = channel.topic or ""
         ticket_owner_id = None
         logs_channel_id = None
@@ -684,7 +620,6 @@ class CloseTicketView(discord.ui.View):
                 except:
                     pass
 
-        # Seuls le créateur du ticket, les admins et le propriétaire peuvent fermer
         is_admin = user.guild_permissions.administrator
         is_owner = user.id == OWNER_ID
         is_creator = user.id == ticket_owner_id
@@ -696,17 +631,15 @@ class CloseTicketView(discord.ui.View):
 
         await interaction.response.send_message("🔒 Fermeture du ticket en cours...")
 
-        # --- Collecte des messages pour les logs ---
         messages = []
         async for msg in channel.history(limit=500, oldest_first=True):
             if msg.author == guild.me and msg.components:
-                continue  # Ignorer les messages avec boutons (les messages du bot)
+                continue
             if msg.content:
                 messages.append(f"{msg.author.display_name}:\n{msg.content}\n")
 
         log_content = "\n".join(messages) if messages else "(aucun message)"
 
-        # --- Envoi du fichier TXT dans le salon de logs ---
         if logs_channel_id:
             logs_chan = bot.get_channel(logs_channel_id)
             if logs_chan:
@@ -725,7 +658,6 @@ class CloseTicketView(discord.ui.View):
                     file=txt_file
                 )
 
-        # Suppression du salon après un court délai
         await asyncio.sleep(3)
         try:
             await channel.delete(reason=f"Ticket fermé par {user}")
@@ -747,7 +679,6 @@ async def check_giveaways():
 
 @tasks.loop(seconds=60)
 async def check_bans():
-    """Vérifie les bans temporaires expirés et unban automatiquement."""
     bans = load_bans()
     now = time.time()
     to_remove = []
@@ -776,19 +707,12 @@ async def check_bans():
 
 @tasks.loop(minutes=20)
 async def enforce_permissions():
-    """
-    Toutes les 20 minutes, vérifie et corrige les permissions pour :
-    - Rôle non-vérifié (ROLE_UNVERIFIED_ID) : aucun accès sauf catégorie + salon exceptions
-    - Rôle Raider (RAIDER_ROLE_ID)          : aucun accès nulle part
-    - Rôle Muted (MUTED_ROLE_ID)            : ne peut pas envoyer de messages
-    """
     for guild in bot.guilds:
         unverified_role = guild.get_role(ROLE_UNVERIFIED_ID)
         raider_role     = guild.get_role(RAIDER_ROLE_ID)
         muted_role      = guild.get_role(MUTED_ROLE_ID)
 
         for channel in guild.channels:
-            # --- Rôle non-vérifié ---
             if unverified_role:
                 is_exception = (
                     channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL
@@ -796,7 +720,6 @@ async def enforce_permissions():
                     or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                 )
                 if is_exception:
-                    # S'assurer qu'il peut lire/écrire dans les exceptions
                     target_ow = channel.overwrites_for(unverified_role)
                     if target_ow.read_messages is not True:
                         try:
@@ -809,7 +732,6 @@ async def enforce_permissions():
                         except:
                             pass
                 else:
-                    # Bloquer partout ailleurs
                     target_ow = channel.overwrites_for(unverified_role)
                     if target_ow.read_messages is not False:
                         try:
@@ -822,7 +744,6 @@ async def enforce_permissions():
                         except:
                             pass
 
-            # --- Rôle Raider ---
             if raider_role:
                 target_ow = channel.overwrites_for(raider_role)
                 if target_ow.read_messages is not False:
@@ -836,7 +757,6 @@ async def enforce_permissions():
                     except:
                         pass
 
-            # --- Rôle Muted ---
             if muted_role:
                 target_ow = channel.overwrites_for(muted_role)
                 if target_ow.send_messages is not False:
@@ -849,14 +769,10 @@ async def enforce_permissions():
                     except:
                         pass
 
-        await asyncio.sleep(0.5)  # Petite pause entre chaque serveur
+        await asyncio.sleep(0.5)
 
 @tasks.loop(minutes=5)
 async def update_roblox_funds():
-    """
-    Toutes les 5 minutes, récupère les funds de chaque groupe Roblox
-    et met à jour les deux salons dédiés séparément.
-    """
     global funds_ugc_message_id, funds_clothing_message_id
 
     cookie = os.getenv("ROBLOX_COOKIE", "")
@@ -901,7 +817,6 @@ async def update_roblox_funds():
                 except:
                     pass
 
-            # Création d'un nouveau message si introuvable
             msg = await chan.send(display)
             if msg_attr == "funds_ugc_message_id":
                 funds_ugc_message_id = msg.id
@@ -919,7 +834,6 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(CloseTicketView())
 
-    # Ré-enregistrement des vues de restauration de rôles persistantes
     role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
     if role_backup_chan:
         async for msg in role_backup_chan.history(limit=200):
@@ -933,7 +847,6 @@ async def on_ready():
                     except:
                         pass
 
-    # Restauration du score depuis le salon DB
     db_chan = bot.get_channel(DB_CHANNEL_ID)
     if db_chan:
         async for message in db_chan.history(limit=50):
@@ -944,12 +857,10 @@ async def on_ready():
                 active_counting_channel = int(parts[3])
                 break
 
-    # Restauration des configs de tickets + enregistrement des vues persistantes
     await load_ticket_configs()
     for ticket_id, config in ticket_configs.items():
         bot.add_view(TicketCreateView(ticket_id))
 
-    # Restauration du tableau de rémunération
     await load_table_from_log()
 
     if not check_giveaways.is_running():
@@ -974,13 +885,11 @@ async def on_message(message):
         if content.isdigit():
             number = int(content)
             if number == current_count + 1 and message.author.id != last_user_id:
-                # Bon nombre, bonne personne
                 current_count = number
                 last_user_id = message.author.id
                 await save_counting_to_db()
                 await message.add_reaction("✅")
             else:
-                # Tout nombre incorrect (trop bas, trop haut, même personne) → reset
                 current_count = 0
                 last_user_id = None
                 await save_counting_to_db()
@@ -991,7 +900,6 @@ async def on_message(message):
 
 @bot.event
 async def on_guild_channel_delete(channel):
-    """Détecte la suppression de salons pour l'anti-raid."""
     guild = channel.guild
     await asyncio.sleep(0.5)
     try:
@@ -1004,7 +912,6 @@ async def on_guild_channel_delete(channel):
 
 @bot.event
 async def on_guild_role_delete(role):
-    """Détecte la suppression de rôles pour l'anti-raid."""
     guild = role.guild
     await asyncio.sleep(0.5)
     try:
@@ -1021,25 +928,19 @@ async def on_guild_role_delete(role):
 
 @bot.command()
 async def help(ctx):
-    """Affiche la liste des commandes disponibles."""
-@bot.command()
-async def help(ctx):
     """Affiche la liste des commandes disponibles selon le rôle de l'utilisateur."""
     user = ctx.author
-    guild = ctx.guild
 
-    # --- Rôles bloqués : Muted, Raider, Unverified ---
     blocked_role_ids = {MUTED_ROLE_ID, RAIDER_ROLE_ID, ROLE_UNVERIFIED_ID}
     user_role_ids = {r.id for r in user.roles}
     if user_role_ids & blocked_role_ids:
-        return  # Silencieux — pas de réponse
+        return
 
     is_owner = (user.id == OWNER_ID)
-    is_membre = (ROLE_VERIFIED_ID in user_role_ids)  # Peu importe ses autres rôles
+    is_membre = (ROLE_VERIFIED_ID in user_role_ids)
 
     embed = discord.Embed(title="📜 Aide Botixirya", color=discord.Color.blue())
 
-    # --- Tout le monde (sauf bloqués) ---
     embed.add_field(name="🛡️ Système", value=(
         f"**{COMMAND_PREFIX}ping** : Affiche la latence.\n"
         f"**{COMMAND_PREFIX}score** : Affiche le score actuel."
@@ -1048,7 +949,6 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]**"
     ), inline=False)
 
-    # --- Visible si la personne N'A PAS le rôle Membre (ou si c'est le owner) ---
     if not is_membre or is_owner:
         embed.add_field(name="⚙️ Admin", value=(
             f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon de comptage.\n"
@@ -1069,7 +969,6 @@ async def help(ctx):
             f"→ Configure un point de création de tickets dans le salon spécifié."
         ), inline=False)
 
-    # --- Owner uniquement ---
     if is_owner:
         embed.add_field(name="👑 Owner", value=(
             f"**{COMMAND_PREFIX}kill** : Éteint le bot.\n"
@@ -1097,7 +996,6 @@ async def help(ctx):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def kill(ctx):
-    """Éteint le bot (score sauvegardé en temps réel)."""
     await ctx.send("💀 Extinction...")
     await asyncio.sleep(2)
     await bot.close()
@@ -1150,7 +1048,6 @@ async def restore(ctx):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def giveaway(ctx, *, args):
-    """Lance un giveaway. Format : [min] [gagnants] [prix] [condition]"""
     m = re.findall(r'\[(.*?)\]', args)
     if len(m) < 4:
         return
@@ -1174,7 +1071,6 @@ async def giveaway(ctx, *, args):
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def msgdel(ctx, number: int, user: discord.Member = None):
-    """Supprime [number] messages, optionnellement filtrés par utilisateur."""
     await ctx.message.delete()
 
     to_delete = []
@@ -1209,7 +1105,6 @@ async def msgdel(ctx, number: int, user: discord.Member = None):
 @bot.command()
 @commands.has_permissions(ban_members=True)
 async def ban(ctx, user: discord.Member, duration: int, *, reason: str = "Aucune raison fournie"):
-    """Bannit un utilisateur. duration en minutes (0 = permanent)."""
     end_time = time.time() + duration * 60 if duration > 0 else None
 
     try:
@@ -1242,7 +1137,6 @@ async def ban(ctx, user: discord.Member, duration: int, *, reason: str = "Aucune
 @bot.command()
 @commands.has_permissions(ban_members=True)
 async def pardon(ctx, user: discord.User):
-    """Débannit un utilisateur."""
     try:
         await ctx.guild.unban(user, reason=f"Pardonné par {ctx.author}")
     except Exception as e:
@@ -1262,7 +1156,6 @@ async def pardon(ctx, user: discord.User):
 @bot.command()
 @commands.has_permissions(kick_members=True)
 async def kick(ctx, user: discord.Member, *, reason: str = "Aucune raison fournie"):
-    """Expulse un utilisateur."""
     try:
         await user.kick(reason=reason)
     except Exception as e:
@@ -1280,7 +1173,6 @@ async def kick(ctx, user: discord.Member, *, reason: str = "Aucune raison fourni
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def mute(ctx, user: discord.Member, *, reason: str = "Aucune raison fournie"):
-    """Mute : donne le rôle Muted et retire le rôle Membre."""
     muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
     membre_role = ctx.guild.get_role(ROLE_VERIFIED_ID)
 
@@ -1306,7 +1198,6 @@ async def mute(ctx, user: discord.Member, *, reason: str = "Aucune raison fourni
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def unmute(ctx, user: discord.Member):
-    """Unmute : retire le rôle Muted et redonne le rôle Membre."""
     muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
     membre_role = ctx.guild.get_role(ROLE_VERIFIED_ID)
 
@@ -1325,16 +1216,12 @@ async def unmute(ctx, user: discord.Member):
 
 @bot.command()
 async def safe(ctx, user: discord.Member):
-    """Lève la quarantaine, restaure les rôles en mémoire et exclut l'utilisateur de la surveillance anti-raid. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
     user_id = str(user.id)
-
-    # Ajout à la liste blanche anti-raid
     safe_users.add(user.id)
 
-    # Levée des overrides de permissions
     for channel in ctx.guild.channels:
         try:
             overwrite = channel.overwrites_for(user)
@@ -1343,7 +1230,6 @@ async def safe(ctx, user: discord.Member):
         except:
             pass
 
-    # Restauration des rôles si en quarantaine
     if user_id in quarantined_users:
         roles_to_restore = []
         for role_id in quarantined_users[user_id]:
@@ -1363,7 +1249,6 @@ async def safe(ctx, user: discord.Member):
 
 @bot.command()
 async def removesafe(ctx, user: discord.Member):
-    """Remet un utilisateur sous surveillance anti-raid (inverse de safe). (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
@@ -1375,16 +1260,11 @@ async def removesafe(ctx, user: discord.Member):
 
     await send_log(f"🔍 **RemoveSafe** : {user.mention} remis sous surveillance par {ctx.author.mention}")
 
-
 # --- Tickets ---
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def TicketCreatingChannel(ctx, *, args):
-    """
-    Configure un point de création de tickets.
-    Format : [category_id] [logs_channel_id] [ChannelMessage] [InsideTicketMessage] [actual_channel_id]
-    """
     m = re.findall(r'\[(.*?)\]', args)
     if len(m) < 5:
         return await ctx.send(
@@ -1401,7 +1281,6 @@ async def TicketCreatingChannel(ctx, *, args):
     except ValueError:
         return await ctx.send("❌ Les IDs doivent être des nombres entiers.")
 
-    # Vérifications
     category = ctx.guild.get_channel(category_id)
     if not category or not isinstance(category, discord.CategoryChannel):
         return await ctx.send(f"❌ Catégorie introuvable avec l'ID `{category_id}`.")
@@ -1414,10 +1293,8 @@ async def TicketCreatingChannel(ctx, *, args):
     if not logs_channel:
         return await ctx.send(f"❌ Salon de logs introuvable avec l'ID `{logs_channel_id}`.")
 
-    # Génération d'un ID unique pour ce système de ticket
     ticket_id = str(uuid.uuid4())
 
-    # Sauvegarde de la config
     config = {
         "ticket_id": ticket_id,
         "actual_channel_id": actual_channel_id,
@@ -1429,15 +1306,10 @@ async def TicketCreatingChannel(ctx, *, args):
     ticket_configs[ticket_id] = config
     await save_ticket_config(config)
 
-    # Enregistrement de la vue persistante
     view = TicketCreateView(ticket_id)
     bot.add_view(view)
 
-    # Envoi du message dans le salon cible
-    embed = discord.Embed(
-        description=channel_message,
-        color=discord.Color.blurple()
-    )
+    embed = discord.Embed(description=channel_message, color=discord.Color.blurple())
     embed.set_footer(text=f"Système de ticket — ID : {ticket_id[:8]}")
     await actual_channel.send(embed=embed, view=view)
 
@@ -1453,19 +1325,17 @@ async def TicketCreatingChannel(ctx, *, args):
 
 @bot.command()
 async def SetTableChannel(ctx):
-    """Définit ce salon comme salon d'affichage du tableau de rémunération. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
     global table_channel_id, table_message_id
     table_channel_id = ctx.channel.id
-    table_message_id = None  # Forcer la création d'un nouveau message
+    table_message_id = None
     await save_table_to_log()
     await refresh_table_message(ctx.guild)
     await ctx.send(f"✅ Salon du tableau défini sur {ctx.channel.mention}.")
 
 @bot.command()
 async def AddTableLine(ctx, user: discord.Member, value: float, *, profession: str):
-    """Ajoute une ligne au tableau pour un utilisateur. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
     from datetime import datetime, timezone
@@ -1486,11 +1356,10 @@ async def AddTableLine(ctx, user: discord.Member, value: float, *, profession: s
     }
     await save_table_to_log()
     await refresh_table_message(ctx.guild)
-    await ctx.send(f"✅ {user.mention} ajouté au tableau. Valeur : `{value}` | Total : `{value}` | Profession : `{profession}`")
+    await ctx.send(f"✅ {user.mention} ajouté. Valeur : `{value}` | Total : `{value}` | Profession : `{profession}`")
 
 @bot.command()
 async def SetTableValue(ctx, user: discord.Member, value: float):
-    """Met à jour la valeur d'un utilisateur dans le tableau. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
     from datetime import datetime, timezone
@@ -1516,7 +1385,6 @@ async def SetTableValue(ctx, user: discord.Member, value: float):
 
 @bot.command()
 async def RemoveTableValue(ctx, user: discord.Member):
-    """Supprime un utilisateur du tableau. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
     uid = str(user.id)
@@ -1530,7 +1398,6 @@ async def RemoveTableValue(ctx, user: discord.Member):
 
 @bot.command()
 async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
-    """Affiche les données d'un utilisateur dans le tableau. (Owner uniquement)"""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
     uid = str(user.id)
@@ -1540,10 +1407,7 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
     entry = table_data[uid]
 
     if column is None:
-        embed = discord.Embed(
-            title=f"📋 Données de {user.display_name}",
-            color=discord.Color.gold()
-        )
+        embed = discord.Embed(title=f"📋 Données de {user.display_name}", color=discord.Color.gold())
         embed.add_field(name="Profession", value=entry.get("profession", "—"), inline=True)
         embed.add_field(name="Valeur actuelle", value=str(entry.get("value", 0)), inline=True)
         embed.add_field(name="Total cumulé", value=str(entry.get("total_value", 0)), inline=True)
@@ -1559,9 +1423,7 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
         }
         col = column.lower()
         if col not in col_map:
-            return await ctx.send(
-                f"❌ Colonne inconnue. Colonnes disponibles : `value`, `total`, `profession`, `time`"
-            )
+            return await ctx.send("❌ Colonnes disponibles : `value`, `total`, `profession`, `time`")
         label, val = col_map[col]
         await ctx.send(f"📋 **{user.display_name}** — {label} : `{val}`")
 
@@ -1571,7 +1433,6 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
 
 @bot.command()
 async def COMMANDSON(ctx):
-    """Active toutes les commandes sur le serveur backup. (Owner uniquement)"""
     global commands_on_backup
     if ctx.guild.id != BACKUP_SERVER_ID:
         return
@@ -1582,7 +1443,6 @@ async def COMMANDSON(ctx):
 
 @bot.command()
 async def backup(ctx):
-    """Copie la structure du serveur principal vers ce serveur. (backup server only)"""
     if ctx.guild.id != BACKUP_SERVER_ID:
         return await ctx.send("❌ Cette commande ne fonctionne que sur le serveur de backup.")
     if ctx.author.id != OWNER_ID:
@@ -1590,15 +1450,11 @@ async def backup(ctx):
 
     main_guild = bot.get_guild(MAIN_SERVER_ID)
     if not main_guild:
-        return await ctx.send(
-            "❌ Impossible d'accéder au serveur principal. "
-            "Le bot est-il présent sur les deux serveurs ?"
-        )
+        return await ctx.send("❌ Impossible d'accéder au serveur principal.")
 
     backup_guild = ctx.guild
     status_msg = await ctx.send("🔄 Démarrage de la backup...")
 
-    # --- Copie des rôles ---
     await status_msg.edit(content="🔄 Copie des rôles en cours...")
     role_map = {}
     existing_roles = {r.name: r for r in backup_guild.roles}
@@ -1611,12 +1467,8 @@ async def backup(ctx):
         else:
             try:
                 new_role = await backup_guild.create_role(
-                    name=role.name,
-                    color=role.color,
-                    permissions=role.permissions,
-                    hoist=role.hoist,
-                    mentionable=role.mentionable,
-                    reason="Botixirya Backup"
+                    name=role.name, color=role.color, permissions=role.permissions,
+                    hoist=role.hoist, mentionable=role.mentionable, reason="Botixirya Backup"
                 )
                 role_map[role.id] = new_role
                 existing_roles[role.name] = new_role
@@ -1624,7 +1476,6 @@ async def backup(ctx):
             except Exception as e:
                 await ctx.send(f"⚠️ Rôle `{role.name}` ignoré : {e}")
 
-    # --- Copie des catégories ---
     await status_msg.edit(content="🔄 Copie des catégories en cours...")
     category_map = {}
     existing_channels = {c.name: c for c in backup_guild.channels}
@@ -1634,17 +1485,13 @@ async def backup(ctx):
             category_map[category.id] = existing_channels[category.name]
         else:
             try:
-                new_cat = await backup_guild.create_category(
-                    name=category.name,
-                    reason="Botixirya Backup"
-                )
+                new_cat = await backup_guild.create_category(name=category.name, reason="Botixirya Backup")
                 category_map[category.id] = new_cat
                 existing_channels[category.name] = new_cat
                 await asyncio.sleep(0.4)
             except Exception as e:
                 await ctx.send(f"⚠️ Catégorie `{category.name}` ignorée : {e}")
 
-    # --- Copie des salons ---
     await status_msg.edit(content="🔄 Copie des salons en cours...")
     for channel in main_guild.channels:
         if isinstance(channel, discord.CategoryChannel):
@@ -1655,24 +1502,17 @@ async def backup(ctx):
         try:
             if isinstance(channel, discord.TextChannel):
                 await backup_guild.create_text_channel(
-                    name=channel.name,
-                    category=cat,
-                    topic=channel.topic or "",
-                    reason="Botixirya Backup"
+                    name=channel.name, category=cat, topic=channel.topic or "", reason="Botixirya Backup"
                 )
             elif isinstance(channel, discord.VoiceChannel):
                 await backup_guild.create_voice_channel(
-                    name=channel.name,
-                    category=cat,
-                    reason="Botixirya Backup"
+                    name=channel.name, category=cat, reason="Botixirya Backup"
                 )
             await asyncio.sleep(0.4)
         except Exception as e:
             await ctx.send(f"⚠️ Salon `{channel.name}` ignoré : {e}")
 
-    await status_msg.edit(
-        content="✅ **Backup terminée !**\nRôles, catégories et salons copiés depuis le serveur principal."
-    )
+    await status_msg.edit(content="✅ **Backup terminée !**\nRôles, catégories et salons copiés depuis le serveur principal.")
 
 # ==========================================
 
