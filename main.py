@@ -85,8 +85,9 @@ table_channel_id = None
 table_message_id = None
 funds_ugc_message_id = None
 funds_clothing_message_id = None
-xp_data = {}            # {user_id: {"xp": int, "level": int}}
+xp_data = {}            # {user_id: {"xp": int, "level": int, "streak": int, "last_daily": str, "xp_today": int}}
 xp_cooldowns = {}       # {user_id: last_xp_timestamp}
+slots_cooldowns = {}    # {user_id: last_slots_timestamp}
 
 # ==========================================
 
@@ -1054,11 +1055,17 @@ async def on_message(message):
         uid = str(member.id)
         now = time.time()
         if now - xp_cooldowns.get(uid, 0) >= XP_COOLDOWN:
+            from datetime import datetime, timezone
             xp_cooldowns[uid] = now
             gained = random.randint(XP_MIN, XP_MAX)
-            entry = xp_data.get(uid, {"xp": 0, "level": 0})
-            old_level = entry["level"]
-            entry["xp"] += gained
+            entry = xp_data.get(uid, {"xp": 0, "level": 0, "streak": 0, "last_daily": None, "xp_today": 0, "last_xp_date": None})
+            old_level = entry.get("level", 0)
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if entry.get("last_xp_date") != today:
+                entry["xp_today"] = 0
+                entry["last_xp_date"] = today
+            entry["xp"] = entry.get("xp", 0) + gained
+            entry["xp_today"] = entry.get("xp_today", 0) + gained
             entry["level"] = get_level(entry["xp"])
             xp_data[uid] = entry
             await save_xp_to_discord()
@@ -1130,15 +1137,23 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}score** : Affiche le score actuel."
     ), inline=False)
     embed.add_field(name="🎮 Fun", value=(
-        f"**{COMMAND_PREFIX}rps @user** : Défie quelqu'un en Pierre/Feuille/Ciseaux.\n"
-        f"**{COMMAND_PREFIX}roll [faces]** : Lance un dé à N faces (défaut : 6).\n"
+        f"**{COMMAND_PREFIX}rps @user** : Pierre/Feuille/Ciseaux.\n"
+        f"**{COMMAND_PREFIX}tictactoe @user** : Morpion interactif.\n"
+        f"**{COMMAND_PREFIX}pendu** : Jeu du pendu.\n"
+        f"**{COMMAND_PREFIX}slots** : Machine à sous (1 fois/10 min).\n"
+        f"**{COMMAND_PREFIX}roll [faces]** : Lance un dé à N faces.\n"
         f"**{COMMAND_PREFIX}coinflip** : Pile ou face.\n"
-        f"**{COMMAND_PREFIX}8ball [question]** : La boule magique répond.\n"
-        f"**{COMMAND_PREFIX}roulette** : Tente ta chance... (1/6 de te faire muter 2 min)."
+        f"**{COMMAND_PREFIX}8ball [question]** : La boule magique.\n"
+        f"**{COMMAND_PREFIX}roulette** : 1/6 de te faire muter 2 min.\n"
+        f"**{COMMAND_PREFIX}ship @user1 @user2** : Compatibilité entre deux membres.\n"
+        f"**{COMMAND_PREFIX}howgay @user** : Gaymètre (pour rire)."
     ), inline=False)
-    embed.add_field(name="📊 Rang", value=(
-        f"**{COMMAND_PREFIX}rank (@user)** : Affiche ton niveau et ta progression.\n"
-        f"**{COMMAND_PREFIX}leaderboard** : Top 10 des membres les plus actifs."
+    embed.add_field(name="📊 Rang & Activité", value=(
+        f"**{COMMAND_PREFIX}rank (@user)** : Ton niveau et ta progression.\n"
+        f"**{COMMAND_PREFIX}leaderboard** : Top 10 membres.\n"
+        f"**{COMMAND_PREFIX}top3** : Podium d'activité du jour.\n"
+        f"**{COMMAND_PREFIX}daily** : Récompense quotidienne (reset à minuit).\n"
+        f"**{COMMAND_PREFIX}streak (@user)** : Streak de daily consécutifs."
     ), inline=False)
 
     if not is_membre or is_owner:
@@ -1830,7 +1845,426 @@ async def leaderboard(ctx):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def COMMANDSON(ctx):
+async def daily(ctx):
+    """Récompense d'XP quotidienne — une fois par jour calendaire (reset à minuit)."""
+    from datetime import datetime, timezone
+    uid = str(ctx.author.id)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    entry = xp_data.get(uid, {"xp": 0, "level": 0, "streak": 0, "last_daily": None, "xp_today": 0})
+
+    if entry.get("last_daily") == today:
+        return await ctx.send(
+            f"⏳ {ctx.author.mention} Tu as déjà réclamé ta récompense aujourd'hui. Reviens demain !"
+        )
+
+    # Calcul du streak
+    yesterday = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                 .__class__.fromtimestamp(
+                     datetime.now(timezone.utc).timestamp() - 86400, tz=timezone.utc
+                 ).strftime("%Y-%m-%d"))
+    last = entry.get("last_daily")
+    if last == yesterday:
+        entry["streak"] = entry.get("streak", 0) + 1
+    else:
+        entry["streak"] = 1
+
+    # Bonus XP selon le streak
+    streak = entry["streak"]
+    bonus_xp = min(50 + (streak - 1) * 10, 200)  # 50 de base, +10 par jour consécutif, max 200
+    entry["xp"] = entry.get("xp", 0) + bonus_xp
+    entry["level"] = get_level(entry["xp"])
+    entry["last_daily"] = today
+    entry["xp_today"] = entry.get("xp_today", 0) + bonus_xp
+    old_level = xp_data.get(uid, {}).get("level", 0)
+    xp_data[uid] = entry
+    await save_xp_to_discord()
+    await check_level_up(ctx.guild, ctx.author, old_level, entry["level"])
+
+    embed = discord.Embed(title="🎁 Récompense quotidienne", color=discord.Color.green())
+    embed.add_field(name="XP gagné", value=f"+**{bonus_xp}** XP", inline=True)
+    embed.add_field(name="🔥 Streak", value=f"**{streak}** jour(s)", inline=True)
+    embed.add_field(name="XP Total", value=f"**{entry['xp']:,}**".replace(",", " "), inline=True)
+    if streak >= 7:
+        embed.set_footer(text=f"🔥 Incroyable ! {streak} jours consécutifs !")
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def streak(ctx, member: discord.Member = None):
+    """Affiche ton streak de daily (ou celui d'un autre membre)."""
+    from datetime import datetime, timezone
+    target = member or ctx.author
+    uid = str(target.id)
+    entry = xp_data.get(uid, {})
+    s = entry.get("streak", 0)
+    last = entry.get("last_daily", "Jamais")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    claimed_today = last == today
+
+    embed = discord.Embed(
+        title=f"🔥 Streak de {target.display_name}",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Jours consécutifs", value=f"**{s}** jour(s)", inline=True)
+    embed.add_field(name="Dernier daily", value=last, inline=True)
+    embed.add_field(
+        name="Aujourd'hui",
+        value="✅ Réclamé" if claimed_today else "❌ Pas encore réclamé",
+        inline=True
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def top3(ctx):
+    """Affiche le podium des 3 membres les plus actifs aujourd'hui."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Filtrer les entrées du jour
+    today_scores = []
+    for uid, entry in xp_data.items():
+        xp_today = entry.get("xp_today", 0) if entry.get("last_xp_date") == today else 0
+        if xp_today > 0:
+            member = ctx.guild.get_member(int(uid))
+            if member:
+                today_scores.append((member, xp_today))
+
+    today_scores.sort(key=lambda x: x[1], reverse=True)
+    top = today_scores[:3]
+
+    if not top:
+        return await ctx.send("Aucune activité enregistrée aujourd'hui pour le moment.")
+
+    medals = ["🥇", "🥈", "🥉"]
+    embed = discord.Embed(title="🏆 Top 3 du jour", color=discord.Color.gold())
+    lines = [f"{medals[i]} **{m.display_name}** — {xp} XP aujourd'hui" for i, (m, xp) in enumerate(top)]
+    embed.description = "\n".join(lines)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def slots(ctx):
+    """Machine à sous — utilisable toutes les 10 minutes."""
+    uid = str(ctx.author.id)
+    now = time.time()
+    cooldown = 600  # 10 minutes
+    last_used = slots_cooldowns.get(uid, 0)
+    remaining = cooldown - (now - last_used)
+
+    if remaining > 0:
+        mins = int(remaining // 60)
+        secs = int(remaining % 60)
+        return await ctx.send(
+            f"⏳ {ctx.author.mention} Attends encore **{mins}m {secs}s** avant de rejouer !"
+        )
+
+    slots_cooldowns[uid] = now
+    symbols = ["🍒", "🍋", "🍇", "⭐", "💎", "🔔"]
+    weights = [35, 25, 20, 12, 5, 3]
+    s1, s2, s3 = random.choices(symbols, weights=weights, k=3)
+
+    if s1 == s2 == s3:
+        if s1 == "💎":
+            result = "💰 **JACKPOT DIAMANT !** +500 XP"
+            xp_gain = 500
+        elif s1 == "⭐":
+            result = "🌟 **JACKPOT ÉTOILE !** +200 XP"
+            xp_gain = 200
+        elif s1 == "🔔":
+            result = "🔔 **JACKPOT CLOCHE !** +150 XP"
+            xp_gain = 150
+        else:
+            result = f"🎉 **Jackpot {s1} !** +100 XP"
+            xp_gain = 100
+    elif s1 == s2 or s2 == s3 or s1 == s3:
+        result = "✨ **Paire !** +30 XP"
+        xp_gain = 30
+    else:
+        result = "😬 Pas de chance... +5 XP de consolation"
+        xp_gain = 5
+
+    # Ajout de l'XP
+    entry = xp_data.get(uid, {"xp": 0, "level": 0, "streak": 0, "last_daily": None, "xp_today": 0})
+    old_level = entry.get("level", 0)
+    entry["xp"] = entry.get("xp", 0) + xp_gain
+    entry["level"] = get_level(entry["xp"])
+    xp_data[uid] = entry
+    await save_xp_to_discord()
+    await check_level_up(ctx.guild, ctx.author, old_level, entry["level"])
+
+    embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.gold())
+    embed.description = f"# {s1} {s2} {s3}\n{result}"
+    embed.set_footer(text=f"Prochain tour dans 10 minutes")
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def ship(ctx, user1: discord.Member, user2: discord.Member):
+    """Calcule la compatibilité entre deux membres."""
+    seed = (user1.id + user2.id) % 101
+    random.seed(seed)
+    percent = random.randint(0, 100)
+    random.seed()  # Reset le seed aléatoire
+
+    bar_length = 20
+    filled = int(bar_length * percent / 100)
+    bar = "❤️" * filled + "🖤" * (bar_length - filled)
+
+    if percent >= 90:
+        comment = "💍 Âmes sœurs !"
+        color = discord.Color.red()
+    elif percent >= 70:
+        comment = "💕 Très bonne complicité !"
+        color = discord.Color.magenta()
+    elif percent >= 50:
+        comment = "💛 Ça pourrait marcher..."
+        color = discord.Color.yellow()
+    elif percent >= 30:
+        comment = "🌊 Pas évident..."
+        color = discord.Color.blue()
+    else:
+        comment = "💔 Mieux vaut rester amis."
+        color = discord.Color.dark_gray()
+
+    embed = discord.Embed(title="💘 Ship-o-mètre", color=color)
+    embed.description = (
+        f"**{user1.display_name}** ❤️ **{user2.display_name}**\n\n"
+        f"`{bar}`\n"
+        f"**{percent}%** — {comment}"
+    )
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def howgay(ctx, member: discord.Member = None):
+    """Mesure le niveau de gaieté d'un membre (pour rire)."""
+    target = member or ctx.author
+    seed = target.id % 101
+    random.seed(seed)
+    percent = random.randint(0, 100)
+    random.seed()
+
+    bar_length = 20
+    filled = int(bar_length * percent / 100)
+    bar = "🌈" * filled + "⬜" * (bar_length - filled)
+
+    if percent == 100:
+        comment = "💯 Maximum atteint 🏳️‍🌈"
+    elif percent >= 80:
+        comment = "C'est clairement établi 🌈"
+    elif percent >= 50:
+        comment = "La moitié du chemin est faite"
+    elif percent >= 20:
+        comment = "Un tout petit peu peut-être ?"
+    else:
+        comment = "Presque rien 😌"
+
+    embed = discord.Embed(
+        title=f"🌈 Gaymètre de {target.display_name}",
+        color=discord.Color.from_rgb(255, 105, 180)
+    )
+    embed.description = f"`{bar}`\n**{percent}%** — {comment}"
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await ctx.send(embed=embed)
+
+# ==========================================
+# VIEW — TIC-TAC-TOE
+# ==========================================
+
+class TicTacToeButton(discord.ui.Button):
+    def __init__(self, row, col):
+        super().__init__(style=discord.ButtonStyle.secondary, label="​", row=row)
+        self.row_pos = row
+        self.col_pos = col
+
+    async def callback(self, interaction: discord.Interaction):
+        view: TicTacToeView = self.view
+        if interaction.user != view.current_player():
+            return await interaction.response.send_message("Ce n'est pas ton tour !", ephemeral=True)
+        if self.label != "​":
+            return await interaction.response.send_message("Cette case est déjà prise !", ephemeral=True)
+
+        symbol = "❌" if view.turn == 0 else "⭕"
+        self.label = symbol
+        self.style = discord.ButtonStyle.danger if view.turn == 0 else discord.ButtonStyle.primary
+        self.disabled = True
+        view.board[self.row_pos][self.col_pos] = view.turn + 1
+        view.turn = 1 - view.turn
+
+        winner = view.check_winner()
+        if winner:
+            winner_member = view.players[winner - 1]
+            for child in view.children:
+                child.disabled = True
+            embed = discord.Embed(
+                title="🎮 Tic-Tac-Toe",
+                description=f"🏆 **{winner_member.display_name}** a gagné !",
+                color=discord.Color.green()
+            )
+            view.stop()
+            await interaction.response.edit_message(embed=embed, view=view)
+        elif view.is_draw():
+            for child in view.children:
+                child.disabled = True
+            embed = discord.Embed(title="🎮 Tic-Tac-Toe", description="⚖️ **Match nul !**", color=discord.Color.orange())
+            view.stop()
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
+            embed = discord.Embed(
+                title="🎮 Tic-Tac-Toe",
+                description=f"Tour de **{view.current_player().display_name}** ({'❌' if view.turn == 0 else '⭕'})",
+                color=discord.Color.blurple()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+
+
+class TicTacToeView(discord.ui.View):
+    def __init__(self, player1: discord.Member, player2: discord.Member):
+        super().__init__(timeout=120)
+        self.players = [player1, player2]
+        self.turn = 0
+        self.board = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+        for r in range(3):
+            for c in range(3):
+                self.add_item(TicTacToeButton(r, c))
+
+    def current_player(self):
+        return self.players[self.turn]
+
+    def check_winner(self):
+        b = self.board
+        lines = [
+            [b[0][0], b[0][1], b[0][2]],
+            [b[1][0], b[1][1], b[1][2]],
+            [b[2][0], b[2][1], b[2][2]],
+            [b[0][0], b[1][0], b[2][0]],
+            [b[0][1], b[1][1], b[2][1]],
+            [b[0][2], b[1][2], b[2][2]],
+            [b[0][0], b[1][1], b[2][2]],
+            [b[0][2], b[1][1], b[2][0]],
+        ]
+        for line in lines:
+            if line[0] != 0 and line[0] == line[1] == line[2]:
+                return line[0]
+        return None
+
+    def is_draw(self):
+        return all(self.board[r][c] != 0 for r in range(3) for c in range(3))
+
+@bot.command()
+async def tictactoe(ctx, opponent: discord.Member):
+    """Lance un morpion interactif contre un autre membre."""
+    if opponent.bot or opponent == ctx.author:
+        return await ctx.send("❌ Choisis un vrai adversaire !")
+    view = TicTacToeView(ctx.author, opponent)
+    embed = discord.Embed(
+        title="🎮 Tic-Tac-Toe",
+        description=(
+            f"**{ctx.author.display_name}** (❌) VS **{opponent.display_name}** (⭕)\n"
+            f"Tour de **{ctx.author.display_name}** (❌)"
+        ),
+        color=discord.Color.blurple()
+    )
+    await ctx.send(embed=embed, view=view)
+
+# ==========================================
+# VIEW — PENDU
+# ==========================================
+
+PENDU_WORDS = [
+    "discord", "serveur", "giveaway", "moderation", "roblox", "communaute",
+    "botixirya", "verification", "quarantaine", "rémunération", "programmation",
+    "python", "commande", "permission", "administrateur", "leaderboard", "streak",
+    "jackpot", "bouton", "categorie", "ticket", "sauvegarde", "statistiques"
+]
+
+PENDU_STAGES = [
+    "```\n  +---+\n  |   |\n      |\n      |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n      |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n  |   |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|   |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n /    |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n / \\  |\n      |\n=========```",
+]
+
+class PenduView(discord.ui.View):
+    def __init__(self, ctx, word: str):
+        super().__init__(timeout=300)
+        self.ctx = ctx
+        self.word = word.lower()
+        self.guessed = set()
+        self.errors = 0
+        self.max_errors = 6
+        self.message = None
+
+    def display_word(self):
+        return " ".join(c if c in self.guessed else "_" for c in self.word)
+
+    def is_won(self):
+        return all(c in self.guessed for c in self.word)
+
+    def build_embed(self):
+        color = discord.Color.green() if self.is_won() else (
+            discord.Color.red() if self.errors >= self.max_errors else discord.Color.blurple()
+        )
+        embed = discord.Embed(title="🪢 Pendu", color=color)
+        embed.add_field(name="Pendu", value=PENDU_STAGES[self.errors], inline=False)
+        embed.add_field(name="Mot", value=f"`{self.display_word()}`", inline=False)
+        guessed_str = " ".join(sorted(self.guessed)) if self.guessed else "—"
+        embed.add_field(name="Lettres essayées", value=guessed_str, inline=True)
+        embed.add_field(name="Erreurs", value=f"{self.errors}/{self.max_errors}", inline=True)
+        return embed
+
+@bot.command()
+async def pendu(ctx):
+    """Lance une partie de pendu — réponds avec une lettre dans le chat."""
+    word = random.choice(PENDU_WORDS)
+    game = PenduView(ctx, word)
+
+    embed = game.build_embed()
+    embed.set_footer(text="Tape une lettre dans le chat pour jouer !")
+    msg = await ctx.send(embed=embed)
+    game.message = msg
+
+    def check(m):
+        return (
+            m.channel == ctx.channel
+            and m.author == ctx.author
+            and len(m.content) == 1
+            and m.content.isalpha()
+        )
+
+    while game.errors < game.max_errors and not game.is_won():
+        try:
+            guess_msg = await bot.wait_for("message", timeout=60, check=check)
+        except asyncio.TimeoutError:
+            await msg.edit(embed=discord.Embed(
+                title="🪢 Pendu",
+                description=f"⏱️ Temps écoulé ! Le mot était **{word}**.",
+                color=discord.Color.orange()
+            ))
+            return
+
+        letter = guess_msg.content.lower()
+        try:
+            await guess_msg.delete()
+        except:
+            pass
+
+        if letter in game.guessed:
+            continue
+
+        game.guessed.add(letter)
+        if letter not in game.word:
+            game.errors += 1
+
+        embed = game.build_embed()
+        if game.is_won():
+            embed.description = f"🎉 Bravo **{ctx.author.display_name}** ! Le mot était **{word}** !"
+        elif game.errors >= game.max_errors:
+            embed.description = f"💀 Perdu ! Le mot était **{word}**."
+        else:
+            embed.set_footer(text="Tape une lettre dans le chat pour jouer !")
+
+        await msg.edit(embed=embed)
     global commands_on_backup
     if ctx.guild.id != BACKUP_SERVER_ID:
         return
