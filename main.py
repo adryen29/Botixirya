@@ -9,6 +9,7 @@ import re
 import sys
 import io
 import uuid
+import math
 import aiohttp
 from flask import Flask
 from threading import Thread
@@ -53,6 +54,21 @@ FUNDS_CLOTHING_CHANNEL_ID = 1483508939504091187  # Salon funds Clothing
 # --- Rôles et zones à vérifier toutes les 20 minutes ---
 PERM_UNVERIFIED_EXCEPTION_CATEGORY = 1478663941168037898
 PERM_UNVERIFIED_EXCEPTION_CHANNEL = 1478669348989177997
+
+# --- Système de niveaux ---
+LEVEL_UP_CHANNEL_ID = 1483746384610857092        # Salon de ping lors d'un niveau à rôle
+XP_MEMORY_CHANNEL_ID = 1483747180853596190       # Sauvegarde de l'XP
+LEVEL_ROLES = {
+    5:   1483745785966366750,
+    10:  1483745824906416138,
+    15:  1483746241379827804,
+    30:  1483745868648546414,
+    50:  1483745915004129280,
+    100: 1483745942468296704,
+}
+XP_COOLDOWN = 60        # Secondes entre deux gains d'XP par utilisateur
+XP_MIN = 15             # XP minimum par message
+XP_MAX = 25             # XP maximum par message
 # ==========================================
 
 # --- État global ---
@@ -69,6 +85,8 @@ table_channel_id = None
 table_message_id = None
 funds_ugc_message_id = None
 funds_clothing_message_id = None
+xp_data = {}            # {user_id: {"xp": int, "level": int}}
+xp_cooldowns = {}       # {user_id: last_xp_timestamp}
 
 # ==========================================
 
@@ -252,8 +270,88 @@ def render_table(guild) -> str:
 
     return "```\n" + "\n".join(lines) + "\n```"
 
-async def refresh_table_message(guild):
-    global table_message_id
+# ==========================================
+# SYSTÈME D'XP / NIVEAUX
+# ==========================================
+
+def save_xp():
+    """Sauvegarde synchrone locale (fallback). La vraie sauvegarde est async via Discord."""
+    pass  # Remplacé par save_xp_to_discord()
+
+async def save_xp_to_discord():
+    """Sauvegarde xp_data dans le salon mémoire Discord."""
+    chan = bot.get_channel(XP_MEMORY_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(xp_data, ensure_ascii=False)
+    async for msg in chan.history(limit=20):
+        if msg.content.startswith("XP_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"XP_SAVE|{payload}")
+
+def load_xp():
+    global xp_data
+    xp_data = {}  # Sera chargé de manière async dans on_ready
+
+async def load_xp_from_discord():
+    """Charge xp_data depuis le salon mémoire Discord au démarrage."""
+    global xp_data
+    chan = bot.get_channel(XP_MEMORY_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=20):
+        if msg.content.startswith("XP_SAVE|"):
+            try:
+                xp_data = json.loads(msg.content[len("XP_SAVE|"):])
+            except:
+                xp_data = {}
+            break
+
+def get_level(xp: int) -> int:
+    """Niveau calculé depuis l'XP total. Formule : level = floor(sqrt(xp / 100))"""
+    return int(math.sqrt(xp / 100))
+
+def xp_for_level(level: int) -> int:
+    """XP total nécessaire pour atteindre ce niveau."""
+    return level * level * 100
+
+def xp_progress(xp: int):
+    """Retourne (level, xp_dans_niveau_actuel, xp_pour_passer_au_suivant)."""
+    level = get_level(xp)
+    current_floor = xp_for_level(level)
+    next_floor = xp_for_level(level + 1)
+    return level, xp - current_floor, next_floor - current_floor
+
+async def check_level_up(guild, member, old_level: int, new_level: int):
+    """Vérifie et attribue les rôles de niveau, ping dans le salon dédié."""
+    if new_level <= old_level:
+        return
+
+    awarded = []
+    for lvl_threshold, role_id in LEVEL_ROLES.items():
+        if old_level < lvl_threshold <= new_level:
+            role = guild.get_role(role_id)
+            if role and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason=f"Niveau {lvl_threshold} atteint")
+                    awarded.append((lvl_threshold, role))
+                except:
+                    pass
+
+    if awarded:
+        chan = bot.get_channel(LEVEL_UP_CHANNEL_ID)
+        if chan:
+            for lvl_threshold, role in awarded:
+                await chan.send(
+                    f"🎉 {member.mention} a atteint le **niveau {lvl_threshold}** "
+                    f"et obtient le rôle {role.mention} !"
+                )
+
+async def refresh_table_message(guild):    global table_message_id
     if not table_channel_id:
         return
     chan = bot.get_channel(table_channel_id)
@@ -928,6 +1026,8 @@ async def on_ready():
         bot.add_view(TicketCreateView(ticket_id))
 
     await load_table_from_log()
+    load_xp()
+    await load_xp_from_discord()
 
     if not check_giveaways.is_running():
         check_giveaways.start()
@@ -943,8 +1043,25 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     global current_count, last_user_id, active_counting_channel
-    if message.author == bot.user:
+    if message.author == bot.user or not message.guild:
         return
+
+    # --- Gain d'XP (membres vérifiés uniquement, avec cooldown) ---
+    member = message.author
+    verified_role = message.guild.get_role(ROLE_VERIFIED_ID)
+    if verified_role and verified_role in member.roles:
+        uid = str(member.id)
+        now = time.time()
+        if now - xp_cooldowns.get(uid, 0) >= XP_COOLDOWN:
+            xp_cooldowns[uid] = now
+            gained = random.randint(XP_MIN, XP_MAX)
+            entry = xp_data.get(uid, {"xp": 0, "level": 0})
+            old_level = entry["level"]
+            entry["xp"] += gained
+            entry["level"] = get_level(entry["xp"])
+            xp_data[uid] = entry
+            await save_xp_to_discord()
+            await check_level_up(message.guild, member, old_level, entry["level"])
 
     if message.channel.id == active_counting_channel:
         content = message.content.strip()
@@ -1010,6 +1127,17 @@ async def help(ctx):
     embed.add_field(name="🛡️ Système", value=(
         f"**{COMMAND_PREFIX}ping** : Affiche la latence.\n"
         f"**{COMMAND_PREFIX}score** : Affiche le score actuel."
+    ), inline=False)
+    embed.add_field(name="🎮 Fun", value=(
+        f"**{COMMAND_PREFIX}rps @user** : Défie quelqu'un en Pierre/Feuille/Ciseaux.\n"
+        f"**{COMMAND_PREFIX}roll [faces]** : Lance un dé à N faces (défaut : 6).\n"
+        f"**{COMMAND_PREFIX}coinflip** : Pile ou face.\n"
+        f"**{COMMAND_PREFIX}8ball [question]** : La boule magique répond.\n"
+        f"**{COMMAND_PREFIX}roulette** : Tente ta chance... (1/6 de te faire muter 2 min)."
+    ), inline=False)
+    embed.add_field(name="📊 Rang", value=(
+        f"**{COMMAND_PREFIX}rank (@user)** : Affiche ton niveau et ta progression.\n"
+        f"**{COMMAND_PREFIX}leaderboard** : Top 10 des membres les plus actifs."
     ), inline=False)
 
     if not is_membre or is_owner:
@@ -1492,8 +1620,213 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
         await ctx.send(f"📋 **{user.display_name}** — {label} : `{val}`")
 
 # ==========================================
-# COMMANDES BACKUP SERVER
+# VIEW — PIERRE FEUILLE CISEAUX
 # ==========================================
+
+class RPSView(discord.ui.View):
+    """Vue interactive pour un duel Pierre/Feuille/Ciseaux entre deux membres."""
+    CHOICES = {"🪨": "Pierre", "📄": "Feuille", "✂️": "Ciseaux"}
+    WINS = {"🪨": "✂️", "📄": "🪨", "✂️": "📄"}
+
+    def __init__(self, challenger: discord.Member, opponent: discord.Member):
+        super().__init__(timeout=60)
+        self.challenger = challenger
+        self.opponent = opponent
+        self.picks = {}  # {user_id: emoji}
+
+        for emoji in self.CHOICES:
+            btn = discord.ui.Button(label=self.CHOICES[emoji], emoji=emoji, style=discord.ButtonStyle.secondary)
+            btn.callback = self._make_callback(emoji)
+            self.add_item(btn)
+
+    def _make_callback(self, emoji):
+        async def callback(interaction: discord.Interaction):
+            user = interaction.user
+            if user.id not in (self.challenger.id, self.opponent.id):
+                return await interaction.response.send_message("Ce duel ne te concerne pas !", ephemeral=True)
+            if user.id in self.picks:
+                return await interaction.response.send_message("Tu as déjà choisi !", ephemeral=True)
+            self.picks[user.id] = emoji
+            await interaction.response.send_message(f"Tu as choisi {emoji} — en attente de l'adversaire...", ephemeral=True)
+
+            if len(self.picks) == 2:
+                c_pick = self.picks[self.challenger.id]
+                o_pick = self.picks[self.opponent.id]
+                if c_pick == o_pick:
+                    result = "⚖️ **Égalité !**"
+                elif self.WINS[c_pick] == o_pick:
+                    result = f"🏆 **{self.challenger.display_name}** gagne ! ({c_pick} bat {o_pick})"
+                else:
+                    result = f"🏆 **{self.opponent.display_name}** gagne ! ({o_pick} bat {c_pick})"
+
+                embed = discord.Embed(title="🪨📄✂️ Résultat", color=discord.Color.blurple())
+                embed.add_field(name=self.challenger.display_name, value=c_pick, inline=True)
+                embed.add_field(name="VS", value="⚔️", inline=True)
+                embed.add_field(name=self.opponent.display_name, value=o_pick, inline=True)
+                embed.description = result
+                self.stop()
+                await interaction.message.edit(embed=embed, view=None)
+        return callback
+
+    async def on_timeout(self):
+        pass
+
+# ==========================================
+# COMMANDES FUN & UTILES (MEMBRES)
+# ==========================================
+
+@bot.command()
+async def rps(ctx, opponent: discord.Member):
+    """Lance un duel Pierre/Feuille/Ciseaux contre un autre membre."""
+    if opponent.bot or opponent == ctx.author:
+        return await ctx.send("❌ Choisis un vrai adversaire !")
+    embed = discord.Embed(
+        title="🪨📄✂️ Pierre / Feuille / Ciseaux",
+        description=(
+            f"{ctx.author.mention} défie {opponent.mention} !\n"
+            f"Les deux joueurs doivent cliquer sur leur choix (visible uniquement par eux)."
+        ),
+        color=discord.Color.blurple()
+    )
+    await ctx.send(embed=embed, view=RPSView(ctx.author, opponent))
+
+@bot.command()
+async def roll(ctx, faces: int = 6):
+    """Lance un dé à N faces (défaut : 6)."""
+    if faces < 2:
+        return await ctx.send("❌ Le dé doit avoir au moins 2 faces.")
+    if faces > 1000000:
+        return await ctx.send("❌ Maximum 1 000 000 faces.")
+    result = random.randint(1, faces)
+    await ctx.send(f"🎲 {ctx.author.mention} lance un d{faces} et obtient **{result}** !")
+
+@bot.command()
+async def coinflip(ctx):
+    """Pile ou face."""
+    result = random.choice(["🪙 **Pile !**", "🪙 **Face !**"])
+    await ctx.send(f"{ctx.author.mention} — {result}")
+
+@bot.command(name="8ball")
+async def eightball(ctx, *, question: str):
+    """La boule magique répond à ta question."""
+    positives = [
+        "Absolument !", "Sans aucun doute.", "Les signes pointent vers oui.",
+        "Très certainement.", "Tu peux compter dessus.", "Oui, définitivement."
+    ]
+    neutres = [
+        "Difficile à dire.", "Repose ta question plus tard.",
+        "Je ne peux pas te le dire maintenant.", "Concentre-toi et redemande.",
+        "Ne compte pas dessus... ou peut-être si ?"
+    ]
+    negatives = [
+        "N'y compte pas.", "Mes sources disent non.",
+        "Les perspectives ne sont pas bonnes.", "Très peu probable.", "Non."
+    ]
+    all_responses = [
+        (positives, discord.Color.green()),
+        (neutres, discord.Color.orange()),
+        (negatives, discord.Color.red())
+    ]
+    pool, color = random.choice(all_responses)
+    response = random.choice(pool)
+    embed = discord.Embed(color=color)
+    embed.add_field(name="🔮 Question", value=question, inline=False)
+    embed.add_field(name="🎱 Réponse", value=response, inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def roulette(ctx):
+    """Roulette russe — 1 chance sur 6 d'être muté 2 minutes."""
+    if random.randint(1, 6) == 1:
+        muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
+        membre_role = ctx.guild.get_role(ROLE_VERIFIED_ID)
+        if muted_role:
+            try:
+                await ctx.author.add_roles(muted_role, reason="Roulette russe")
+                if membre_role and membre_role in ctx.author.roles:
+                    await ctx.author.remove_roles(membre_role)
+                await ctx.send(
+                    f"💀 **BANG !** {ctx.author.mention} est muté pendant 2 minutes... "
+                    f"Pas de chance !"
+                )
+                await asyncio.sleep(120)
+                await ctx.author.remove_roles(muted_role, reason="Roulette russe — fin")
+                if membre_role:
+                    await ctx.author.add_roles(membre_role)
+            except:
+                pass
+        else:
+            await ctx.send(f"💀 **BANG !** {ctx.author.mention} aurait été muté... mais le rôle est introuvable !")
+    else:
+        await ctx.send(f"🔫 *clic* — {ctx.author.mention} a survécu ! (1 chance sur 6)")
+
+# ==========================================
+# COMMANDES RANG & LEADERBOARD
+# ==========================================
+
+@bot.command()
+async def rank(ctx, member: discord.Member = None):
+    """Affiche ton niveau et ton XP (ou celui d'un autre membre)."""
+    target = member or ctx.author
+    uid = str(target.id)
+    entry = xp_data.get(uid, {"xp": 0, "level": 0})
+    total_xp = entry["xp"]
+    level, xp_in_level, xp_needed = xp_progress(total_xp)
+
+    # Barre de progression ASCII
+    bar_length = 20
+    filled = int(bar_length * xp_in_level / xp_needed) if xp_needed > 0 else bar_length
+    bar = "█" * filled + "░" * (bar_length - filled)
+
+    # Rang dans le serveur
+    sorted_users = sorted(xp_data.items(), key=lambda x: x[1].get("xp", 0), reverse=True)
+    rank_pos = next((i + 1 for i, (uid2, _) in enumerate(sorted_users) if uid2 == uid), "?")
+
+    embed = discord.Embed(
+        title=f"📊 Niveau de {target.display_name}",
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Niveau", value=f"**{level}**", inline=True)
+    embed.add_field(name="XP Total", value=f"**{total_xp:,}**".replace(",", " "), inline=True)
+    embed.add_field(name="Rang", value=f"**#{rank_pos}**", inline=True)
+    embed.add_field(
+        name=f"Progression vers le niveau {level + 1}",
+        value=f"`{bar}` {xp_in_level}/{xp_needed} XP",
+        inline=False
+    )
+
+    # Prochain rôle
+    next_role_level = next((lvl for lvl in sorted(LEVEL_ROLES) if lvl > level), None)
+    if next_role_level:
+        role = ctx.guild.get_role(LEVEL_ROLES[next_role_level])
+        role_name = role.name if role else f"Niveau {next_role_level}"
+        embed.add_field(name="Prochain rôle", value=f"{role_name} au niveau **{next_role_level}**", inline=False)
+
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def leaderboard(ctx):
+    """Affiche le top 10 des membres les plus actifs."""
+    sorted_users = sorted(xp_data.items(), key=lambda x: x[1].get("xp", 0), reverse=True)[:10]
+
+    if not sorted_users:
+        return await ctx.send("Aucune donnée d'XP pour le moment.")
+
+    embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, entry) in enumerate(sorted_users):
+        member = ctx.guild.get_member(int(uid))
+        name = member.display_name if member else f"ID:{uid}"
+        medal = medals[i] if i < 3 else f"`#{i+1}`"
+        lines.append(
+            f"{medal} **{name}** — Niv. {entry.get('level', 0)} "
+            f"({entry.get('xp', 0):,} XP)".replace(",", " ")
+        )
+
+    embed.description = "\n".join(lines)
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def COMMANDSON(ctx):
