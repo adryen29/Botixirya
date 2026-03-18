@@ -351,7 +351,8 @@ async def check_level_up(guild, member, old_level: int, new_level: int):
                     f"et obtient le rôle {role.mention} !"
                 )
 
-async def refresh_table_message(guild):    global table_message_id
+async def refresh_table_message(guild):
+    global table_message_id
     if not table_channel_id:
         return
     chan = bot.get_channel(table_channel_id)
