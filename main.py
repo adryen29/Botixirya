@@ -11,7 +11,7 @@ import io
 import uuid
 import math
 import aiohttp
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 
 # ==========================================
@@ -69,6 +69,11 @@ LEVEL_ROLES = {
 XP_COOLDOWN = 60        # Secondes entre deux gains d'XP par utilisateur
 XP_MIN = 15             # XP minimum par message
 XP_MAX = 25             # XP maximum par message
+
+# --- Donations Roblox ---
+DONATION_SCOREBOARD_CHANNEL_ID = 1484302892059066538  # Salon affichage scoreboard
+DONATION_MEMORY_CHANNEL_ID = 1484303351649665116      # Salon logs/sauvegarde donations
+DONATION_SECRET = os.getenv("DONATION_SECRET", "change_moi")  # Token secret Roblox → bot
 # ==========================================
 
 # --- État global ---
@@ -89,6 +94,9 @@ xp_data = {}            # {user_id: {"xp": int, "level": int, "streak": int, "la
 xp_cooldowns = {}       # {user_id: last_xp_timestamp}
 slots_cooldowns = {}    # {user_id: last_slots_timestamp}
 
+# --- Donations ---
+donations_data = {}     # {user_id: {"username": str, "total": int}}
+scoreboard_message_id = None
 # ==========================================
 
 app = Flask('')
@@ -96,6 +104,34 @@ app = Flask('')
 @app.route('/')
 def home():
     return "Botixirya Status: OK"
+
+@app.route('/donation', methods=['POST'])
+def receive_donation():
+    token = request.headers.get("X-Secret-Token", "")
+    if token != DONATION_SECRET:
+        return {"error": "Unauthorized"}, 401
+
+    data = request.get_json()
+    if not data:
+        return {"error": "Invalid JSON"}, 400
+
+    user_id = str(data.get("userId", ""))
+    username = data.get("username", "Inconnu")
+    amount = int(data.get("amount", 0))
+
+    if not user_id or amount <= 0:
+        return {"error": "Invalid data"}, 400
+
+    if user_id not in donations_data:
+        donations_data[user_id] = {"username": username, "total": 0}
+
+    donations_data[user_id]["username"] = username
+    donations_data[user_id]["total"] += amount
+
+    asyncio.run_coroutine_threadsafe(save_donations_to_discord(), bot.loop)
+    asyncio.run_coroutine_threadsafe(refresh_scoreboard(), bot.loop)
+
+    return {"success": True, "total": donations_data[user_id]["total"]}, 200
 
 def run():
     port = int(os.environ.get("PORT", 8000))
@@ -276,11 +312,9 @@ def render_table(guild) -> str:
 # ==========================================
 
 def save_xp():
-    """Sauvegarde synchrone locale (fallback). La vraie sauvegarde est async via Discord."""
-    pass  # Remplacé par save_xp_to_discord()
+    pass
 
 async def save_xp_to_discord():
-    """Sauvegarde xp_data dans le salon mémoire Discord."""
     chan = bot.get_channel(XP_MEMORY_CHANNEL_ID)
     if not chan:
         return
@@ -296,10 +330,9 @@ async def save_xp_to_discord():
 
 def load_xp():
     global xp_data
-    xp_data = {}  # Sera chargé de manière async dans on_ready
+    xp_data = {}
 
 async def load_xp_from_discord():
-    """Charge xp_data depuis le salon mémoire Discord au démarrage."""
     global xp_data
     chan = bot.get_channel(XP_MEMORY_CHANNEL_ID)
     if not chan:
@@ -313,22 +346,18 @@ async def load_xp_from_discord():
             break
 
 def get_level(xp: int) -> int:
-    """Niveau calculé depuis l'XP total. Formule : level = floor(sqrt(xp / 100))"""
     return int(math.sqrt(xp / 100))
 
 def xp_for_level(level: int) -> int:
-    """XP total nécessaire pour atteindre ce niveau."""
     return level * level * 100
 
 def xp_progress(xp: int):
-    """Retourne (level, xp_dans_niveau_actuel, xp_pour_passer_au_suivant)."""
     level = get_level(xp)
     current_floor = xp_for_level(level)
     next_floor = xp_for_level(level + 1)
     return level, xp - current_floor, next_floor - current_floor
 
 async def check_level_up(guild, member, old_level: int, new_level: int):
-    """Vérifie et attribue les rôles de niveau, ping dans le salon dédié."""
     if new_level <= old_level:
         return
 
@@ -378,6 +407,74 @@ async def refresh_table_message(guild):
     msg = await chan.send(embed=embed)
     table_message_id = msg.id
     await save_table_to_log()
+
+# ==========================================
+# SYSTÈME DE DONATIONS ROBLOX
+# ==========================================
+
+async def save_donations_to_discord():
+    chan = bot.get_channel(DONATION_MEMORY_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(donations_data, ensure_ascii=False)
+    async for msg in chan.history(limit=20):
+        if msg.content.startswith("DONATION_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"DONATION_SAVE|{payload}")
+
+async def load_donations_from_discord():
+    global donations_data
+    chan = bot.get_channel(DONATION_MEMORY_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=20):
+        if msg.content.startswith("DONATION_SAVE|"):
+            try:
+                donations_data = json.loads(msg.content[len("DONATION_SAVE|"):])
+            except:
+                donations_data = {}
+            break
+
+async def refresh_scoreboard():
+    global scoreboard_message_id
+    chan = bot.get_channel(DONATION_SCOREBOARD_CHANNEL_ID)
+    if not chan:
+        return
+
+    sorted_donors = sorted(
+        donations_data.items(),
+        key=lambda x: x[1].get("total", 0),
+        reverse=True
+    )
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, entry) in enumerate(sorted_donors[:10]):
+        medal = medals[i] if i < 3 else f"`#{i+1}`"
+        total = f"{entry.get('total', 0):,}".replace(",", " ")
+        lines.append(f"{medal} **{entry.get('username', uid)}** — {total} Robux")
+
+    embed = discord.Embed(
+        title="💸 Top Donateurs — Aavixyria Donations",
+        description="\n".join(lines) if lines else "Aucune donation pour le moment.",
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text=f"Mis à jour le {discord.utils.utcnow().strftime('%d/%m/%Y à %H:%M')} UTC")
+
+    if scoreboard_message_id:
+        try:
+            msg = await chan.fetch_message(scoreboard_message_id)
+            await msg.edit(embed=embed)
+            return
+        except:
+            pass
+
+    msg = await chan.send(embed=embed)
+    scoreboard_message_id = msg.id
 
 # ==========================================
 # ANTI-RAID
@@ -872,7 +969,6 @@ async def enforce_permissions():
         await asyncio.sleep(0.5)
 
 async def send_funds_error(msg: str):
-    """Envoie une erreur Roblox Funds dans les logs avec un ping au propriétaire."""
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if channel:
         await channel.send(f"<@{OWNER_ID}> {msg}")
@@ -900,7 +996,6 @@ async def update_roblox_funds():
 
     async with aiohttp.ClientSession() as session:
 
-        # --- Vérification que le cookie est valide ---
         try:
             async with session.get(
                 "https://users.roblox.com/v1/users/authenticated",
@@ -917,7 +1012,6 @@ async def update_roblox_funds():
             await send_funds_error(f"⚠️ **Roblox Funds** : Impossible de vérifier le cookie — `{e}`")
             return
 
-        # --- Récupération du CSRF token ---
         csrf_token = None
         try:
             async with session.post(
@@ -942,8 +1036,7 @@ async def update_roblox_funds():
                         new_name = f"💵·{label}: {robux:,} Robux".replace(",", " ")
                     elif resp.status == 401:
                         await send_funds_error(
-                            f"⚠️ **Roblox Funds — {label}** : Cookie invalide ou expiré (HTTP 401).\n"
-                            f"Renouvelez la variable `ROBLOX_COOKIE` dans Koyeb."
+                            f"⚠️ **Roblox Funds — {label}** : Cookie invalide ou expiré (HTTP 401)."
                         )
                         continue
                     elif resp.status == 403:
@@ -956,8 +1049,7 @@ async def update_roblox_funds():
                         except:
                             detail = await resp.text()
                         await send_funds_error(
-                            f"⚠️ **Roblox Funds — {label}** : HTTP 403 sur le groupe `{group_id}`.\n"
-                            f"Détail Roblox : `{detail[:400]}`"
+                            f"⚠️ **Roblox Funds — {label}** : HTTP 403 — `{detail[:400]}`"
                         )
                         continue
                     else:
@@ -966,20 +1058,16 @@ async def update_roblox_funds():
                         except:
                             body = "(corps illisible)"
                         await send_funds_error(
-                            f"⚠️ **Roblox Funds — {label}** : HTTP `{resp.status}` sur le groupe `{group_id}`.\n"
-                            f"Détail : `{body[:200]}`"
+                            f"⚠️ **Roblox Funds — {label}** : HTTP `{resp.status}` — `{body[:200]}`"
                         )
                         continue
             except asyncio.TimeoutError:
-                await send_funds_error(
-                    f"⚠️ **Roblox Funds — {label}** : Timeout (groupe `{group_id}`)."
-                )
+                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Timeout.")
                 continue
             except Exception as e:
-                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Erreur inattendue — `{e}`")
+                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Erreur — `{e}`")
                 continue
 
-            # Mise à jour du nom du salon vocal
             chan = bot.get_channel(channel_id)
             if not chan:
                 await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Salon `{channel_id}` introuvable.")
@@ -987,7 +1075,7 @@ async def update_roblox_funds():
             try:
                 await chan.edit(name=new_name, reason="Botixirya : mise à jour funds Roblox")
             except Exception as e:
-                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Impossible de renommer le salon — `{e}`")
+                await send_funds_error(f"⚠️ **Roblox Funds — {label}** : Impossible de renommer — `{e}`")
 
 # ==========================================
 # ÉVÉNEMENTS
@@ -1030,6 +1118,8 @@ async def on_ready():
     await load_table_from_log()
     load_xp()
     await load_xp_from_discord()
+    await load_donations_from_discord()
+    await refresh_scoreboard()
 
     if not check_giveaways.is_running():
         check_giveaways.start()
@@ -1048,7 +1138,6 @@ async def on_message(message):
     if message.author == bot.user or not message.guild:
         return
 
-    # --- Gain d'XP (membres vérifiés uniquement, avec cooldown) ---
     member = message.author
     verified_role = message.guild.get_role(ROLE_VERIFIED_ID)
     if verified_role and verified_role in member.roles:
@@ -1119,7 +1208,6 @@ async def on_guild_role_delete(role):
 
 @bot.command()
 async def help(ctx):
-    """Affiche la liste des commandes disponibles selon le rôle de l'utilisateur."""
     user = ctx.author
 
     blocked_role_ids = {MUTED_ROLE_ID, RAIDER_ROLE_ID, ROLE_UNVERIFIED_ID}
@@ -1154,6 +1242,9 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}top3** : Podium d'activité du jour.\n"
         f"**{COMMAND_PREFIX}daily** : Récompense quotidienne (reset à minuit).\n"
         f"**{COMMAND_PREFIX}streak (@user)** : Streak de daily consécutifs."
+    ), inline=False)
+    embed.add_field(name="💸 Donations", value=(
+        f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox."
     ), inline=False)
 
     if not is_membre or is_owner:
@@ -1636,11 +1727,37 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
         await ctx.send(f"📋 **{user.display_name}** — {label} : `{val}`")
 
 # ==========================================
+# COMMANDE SCOREBOARD DONATIONS
+# ==========================================
+
+@bot.command()
+async def scoreboard(ctx):
+    """Affiche le classement des donateurs Roblox."""
+    sorted_donors = sorted(
+        donations_data.items(),
+        key=lambda x: x[1].get("total", 0),
+        reverse=True
+    )
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, entry) in enumerate(sorted_donors[:10]):
+        medal = medals[i] if i < 3 else f"`#{i+1}`"
+        total = f"{entry.get('total', 0):,}".replace(",", " ")
+        lines.append(f"{medal} **{entry.get('username', uid)}** — {total} Robux")
+
+    embed = discord.Embed(
+        title="💸 Top Donateurs Roblox",
+        description="\n".join(lines) if lines else "Aucune donation pour le moment.",
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=embed)
+
+# ==========================================
 # VIEW — PIERRE FEUILLE CISEAUX
 # ==========================================
 
 class RPSView(discord.ui.View):
-    """Vue interactive pour un duel Pierre/Feuille/Ciseaux entre deux membres."""
     CHOICES = {"🪨": "Pierre", "📄": "Feuille", "✂️": "Ciseaux"}
     WINS = {"🪨": "✂️", "📄": "🪨", "✂️": "📄"}
 
@@ -1648,7 +1765,7 @@ class RPSView(discord.ui.View):
         super().__init__(timeout=60)
         self.challenger = challenger
         self.opponent = opponent
-        self.picks = {}  # {user_id: emoji}
+        self.picks = {}
 
         for emoji in self.CHOICES:
             btn = discord.ui.Button(label=self.CHOICES[emoji], emoji=emoji, style=discord.ButtonStyle.secondary)
@@ -1693,7 +1810,6 @@ class RPSView(discord.ui.View):
 
 @bot.command()
 async def rps(ctx, opponent: discord.Member):
-    """Lance un duel Pierre/Feuille/Ciseaux contre un autre membre."""
     if opponent.bot or opponent == ctx.author:
         return await ctx.send("❌ Choisis un vrai adversaire !")
     embed = discord.Embed(
@@ -1708,7 +1824,6 @@ async def rps(ctx, opponent: discord.Member):
 
 @bot.command()
 async def roll(ctx, faces: int = 6):
-    """Lance un dé à N faces (défaut : 6)."""
     if faces < 2:
         return await ctx.send("❌ Le dé doit avoir au moins 2 faces.")
     if faces > 1000000:
@@ -1718,13 +1833,11 @@ async def roll(ctx, faces: int = 6):
 
 @bot.command()
 async def coinflip(ctx):
-    """Pile ou face."""
     result = random.choice(["🪙 **Pile !**", "🪙 **Face !**"])
     await ctx.send(f"{ctx.author.mention} — {result}")
 
 @bot.command(name="8ball")
 async def eightball(ctx, *, question: str):
-    """La boule magique répond à ta question."""
     positives = [
         "Absolument !", "Sans aucun doute.", "Les signes pointent vers oui.",
         "Très certainement.", "Tu peux compter dessus.", "Oui, définitivement."
@@ -1752,7 +1865,6 @@ async def eightball(ctx, *, question: str):
 
 @bot.command()
 async def roulette(ctx):
-    """Roulette russe — 1 chance sur 6 d'être muté 2 minutes."""
     if random.randint(1, 6) == 1:
         muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
         membre_role = ctx.guild.get_role(ROLE_VERIFIED_ID)
@@ -1782,19 +1894,16 @@ async def roulette(ctx):
 
 @bot.command()
 async def rank(ctx, member: discord.Member = None):
-    """Affiche ton niveau et ton XP (ou celui d'un autre membre)."""
     target = member or ctx.author
     uid = str(target.id)
     entry = xp_data.get(uid, {"xp": 0, "level": 0})
     total_xp = entry["xp"]
     level, xp_in_level, xp_needed = xp_progress(total_xp)
 
-    # Barre de progression ASCII
     bar_length = 20
     filled = int(bar_length * xp_in_level / xp_needed) if xp_needed > 0 else bar_length
     bar = "█" * filled + "░" * (bar_length - filled)
 
-    # Rang dans le serveur
     sorted_users = sorted(xp_data.items(), key=lambda x: x[1].get("xp", 0), reverse=True)
     rank_pos = next((i + 1 for i, (uid2, _) in enumerate(sorted_users) if uid2 == uid), "?")
 
@@ -1812,7 +1921,6 @@ async def rank(ctx, member: discord.Member = None):
         inline=False
     )
 
-    # Prochain rôle
     next_role_level = next((lvl for lvl in sorted(LEVEL_ROLES) if lvl > level), None)
     if next_role_level:
         role = ctx.guild.get_role(LEVEL_ROLES[next_role_level])
@@ -1823,7 +1931,6 @@ async def rank(ctx, member: discord.Member = None):
 
 @bot.command()
 async def leaderboard(ctx):
-    """Affiche le top 10 des membres les plus actifs."""
     sorted_users = sorted(xp_data.items(), key=lambda x: x[1].get("xp", 0), reverse=True)[:10]
 
     if not sorted_users:
@@ -1846,7 +1953,6 @@ async def leaderboard(ctx):
 
 @bot.command()
 async def daily(ctx):
-    """Récompense d'XP quotidienne — une fois par jour calendaire (reset à minuit)."""
     from datetime import datetime, timezone
     uid = str(ctx.author.id)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1857,7 +1963,6 @@ async def daily(ctx):
             f"⏳ {ctx.author.mention} Tu as déjà réclamé ta récompense aujourd'hui. Reviens demain !"
         )
 
-    # Calcul du streak
     yesterday = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
                  .__class__.fromtimestamp(
                      datetime.now(timezone.utc).timestamp() - 86400, tz=timezone.utc
@@ -1868,9 +1973,8 @@ async def daily(ctx):
     else:
         entry["streak"] = 1
 
-    # Bonus XP selon le streak
     streak = entry["streak"]
-    bonus_xp = min(50 + (streak - 1) * 10, 200)  # 50 de base, +10 par jour consécutif, max 200
+    bonus_xp = min(50 + (streak - 1) * 10, 200)
     entry["xp"] = entry.get("xp", 0) + bonus_xp
     entry["level"] = get_level(entry["xp"])
     entry["last_daily"] = today
@@ -1890,7 +1994,6 @@ async def daily(ctx):
 
 @bot.command()
 async def streak(ctx, member: discord.Member = None):
-    """Affiche ton streak de daily (ou celui d'un autre membre)."""
     from datetime import datetime, timezone
     target = member or ctx.author
     uid = str(target.id)
@@ -1916,11 +2019,9 @@ async def streak(ctx, member: discord.Member = None):
 
 @bot.command()
 async def top3(ctx):
-    """Affiche le podium des 3 membres les plus actifs aujourd'hui."""
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Filtrer les entrées du jour
     today_scores = []
     for uid, entry in xp_data.items():
         xp_today = entry.get("xp_today", 0) if entry.get("last_xp_date") == today else 0
@@ -1943,10 +2044,9 @@ async def top3(ctx):
 
 @bot.command()
 async def slots(ctx):
-    """Machine à sous — utilisable toutes les 10 minutes."""
     uid = str(ctx.author.id)
     now = time.time()
-    cooldown = 600  # 10 minutes
+    cooldown = 600
     last_used = slots_cooldowns.get(uid, 0)
     remaining = cooldown - (now - last_used)
 
@@ -1982,7 +2082,6 @@ async def slots(ctx):
         result = "😬 Pas de chance... +5 XP de consolation"
         xp_gain = 5
 
-    # Ajout de l'XP
     entry = xp_data.get(uid, {"xp": 0, "level": 0, "streak": 0, "last_daily": None, "xp_today": 0})
     old_level = entry.get("level", 0)
     entry["xp"] = entry.get("xp", 0) + xp_gain
@@ -1998,11 +2097,10 @@ async def slots(ctx):
 
 @bot.command()
 async def ship(ctx, user1: discord.Member, user2: discord.Member):
-    """Calcule la compatibilité entre deux membres."""
     seed = (user1.id + user2.id) % 101
     random.seed(seed)
     percent = random.randint(0, 100)
-    random.seed()  # Reset le seed aléatoire
+    random.seed()
 
     bar_length = 20
     filled = int(bar_length * percent / 100)
@@ -2034,7 +2132,6 @@ async def ship(ctx, user1: discord.Member, user2: discord.Member):
 
 @bot.command()
 async def howgay(ctx, member: discord.Member = None):
-    """Mesure le niveau de gaieté d'un membre (pour rire)."""
     target = member or ctx.author
     seed = target.id % 101
     random.seed(seed)
@@ -2150,7 +2247,6 @@ class TicTacToeView(discord.ui.View):
 
 @bot.command()
 async def tictactoe(ctx, opponent: discord.Member):
-    """Lance un morpion interactif contre un autre membre."""
     if opponent.bot or opponent == ctx.author:
         return await ctx.send("❌ Choisis un vrai adversaire !")
     view = TicTacToeView(ctx.author, opponent)
@@ -2215,7 +2311,6 @@ class PenduView(discord.ui.View):
 
 @bot.command()
 async def pendu(ctx):
-    """Lance une partie de pendu — réponds avec une lettre dans le chat."""
     word = random.choice(PENDU_WORDS)
     game = PenduView(ctx, word)
 
@@ -2265,6 +2360,13 @@ async def pendu(ctx):
             embed.set_footer(text="Tape une lettre dans le chat pour jouer !")
 
         await msg.edit(embed=embed)
+
+# ==========================================
+# COMMANDES BACKUP
+# ==========================================
+
+@bot.command()
+async def COMMANDSON(ctx):
     global commands_on_backup
     if ctx.guild.id != BACKUP_SERVER_ID:
         return
