@@ -439,43 +439,60 @@ async def load_donations_from_discord():
                 donations_data = {}
             break
 
-async def refresh_scoreboard():
-    global scoreboard_message_id
-    chan = bot.get_channel(DONATION_SCOREBOARD_CHANNEL_ID)
-    if not chan:
-        return
-
+def build_scoreboard_embed():
+    """Construit l'embed du topboard donations."""
     sorted_donors = sorted(
         donations_data.items(),
         key=lambda x: x[1].get("total", 0),
         reverse=True
     )
 
-    def fmt(entry):
-        total = f"{entry.get('total', 0):,}".replace(",", " ")
-        return f"**{entry.get('username', '???')}**\n{total} Robux"
-
-    embed = discord.Embed(
-        title="🏆 Topboard des Donations en Robux",
-        color=discord.Color.gold()
-    )
-
     p1 = sorted_donors[0] if len(sorted_donors) > 0 else None
     p2 = sorted_donors[1] if len(sorted_donors) > 1 else None
     p3 = sorted_donors[2] if len(sorted_donors) > 2 else None
 
-    embed.add_field(name="🥈 2ème Place", value=fmt(p2[1]) if p2 else "—", inline=True)
-    embed.add_field(name="🥇 1ère Place", value=fmt(p1[1]) if p1 else "—", inline=True)
-    embed.add_field(name="🥉 3ème Place", value=fmt(p3[1]) if p3 else "—", inline=True)
+    def fmt_podium(place_label, entry):
+        if not entry:
+            return f"{place_label}\n*Personne*\n—"
+        total = f"{entry.get('total', 0):,}".replace(",", " ")
+        return f"{place_label}\n**{entry.get('username', '???')}**\n💰 {total} Robux"
+
+    embed = discord.Embed(color=discord.Color.gold())
+    embed.description = (
+        "```\n"
+        "╔══════════════════════════════════════╗\n"
+        "║     🏆  TOPBOARD DES DONATIONS  🏆    ║\n"
+        "║           Aavixyria Donations          ║\n"
+        "╚══════════════════════════════════════╝\n"
+        "```"
+    )
+
+    embed.add_field(name="\u200b", value=fmt_podium("🥈 **2ème Place**", p2[1] if p2 else None), inline=True)
+    embed.add_field(name="\u200b", value=fmt_podium("🥇 **1ère Place**", p1[1] if p1 else None), inline=True)
+    embed.add_field(name="\u200b", value=fmt_podium("🥉 **3ème Place**", p3[1] if p3 else None), inline=True)
+    embed.add_field(name="\u200b", value="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
 
     if len(sorted_donors) > 3:
         lines = []
-        for i, (uid, entry) in enumerate(sorted_donors[3:10], start=4):
+        for i, (uid, entry) in enumerate(sorted_donors[3:15], start=4):
             total = f"{entry.get('total', 0):,}".replace(",", " ")
-            lines.append(f"`#{i}` **{entry.get('username', uid)}** — {total} Robux")
-        embed.add_field(name="━━━━━━━━━━━━━━━━", value="\n".join(lines), inline=False)
+            lines.append(f"> `#{i}` ┊ **{entry.get('username', uid)}** — 💰 {total} Robux")
+        embed.add_field(name="🎖️ Autres donateurs", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="🎖️ Autres donateurs", value="> *Aucun autre donateur pour le moment.*", inline=False)
 
-    embed.set_footer(text="💝 Merci énormément pour vos donations 💝")
+    embed.add_field(name="\u200b", value="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
+    embed.set_footer(text="💝  Merci énormément pour vos donations  💝")
+    return embed
+
+
+async def refresh_scoreboard():
+    global scoreboard_message_id
+    chan = bot.get_channel(DONATION_SCOREBOARD_CHANNEL_ID)
+    if not chan:
+        return
+
+    embed = build_scoreboard_embed()
 
     if scoreboard_message_id:
         try:
@@ -1256,7 +1273,8 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}streak (@user)** : Streak de daily consécutifs."
     ), inline=False)
     embed.add_field(name="💸 Donations", value=(
-        f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox."
+        f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox.\n"
+        f"**{COMMAND_PREFIX}RobuxLeaderBoard** : Affiche le topboard complet des donations dans le salon courant."
     ), inline=False)
 
     if not is_membre or is_owner:
@@ -1745,37 +1763,13 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
 @bot.command()
 async def scoreboard(ctx):
     """Affiche le classement des donateurs Roblox."""
-    sorted_donors = sorted(
-        donations_data.items(),
-        key=lambda x: x[1].get("total", 0),
-        reverse=True
-    )
+    embed = build_scoreboard_embed()
+    await ctx.send(embed=embed)
 
-    def fmt(entry):
-        total = f"{entry.get('total', 0):,}".replace(",", " ")
-        return f"**{entry.get('username', '???')}**\n{total} Robux"
-
-    embed = discord.Embed(
-        title="🏆 Topboard des Donations en Robux",
-        color=discord.Color.gold()
-    )
-
-    p1 = sorted_donors[0] if len(sorted_donors) > 0 else None
-    p2 = sorted_donors[1] if len(sorted_donors) > 1 else None
-    p3 = sorted_donors[2] if len(sorted_donors) > 2 else None
-
-    embed.add_field(name="🥈 2ème Place", value=fmt(p2[1]) if p2 else "—", inline=True)
-    embed.add_field(name="🥇 1ère Place", value=fmt(p1[1]) if p1 else "—", inline=True)
-    embed.add_field(name="🥉 3ème Place", value=fmt(p3[1]) if p3 else "—", inline=True)
-
-    if len(sorted_donors) > 3:
-        lines = []
-        for i, (uid, entry) in enumerate(sorted_donors[3:10], start=4):
-            total = f"{entry.get('total', 0):,}".replace(",", " ")
-            lines.append(f"`#{i}` **{entry.get('username', uid)}** — {total} Robux")
-        embed.add_field(name="━━━━━━━━━━━━━━━━", value="\n".join(lines), inline=False)
-
-    embed.set_footer(text="💝 Merci énormément pour vos donations 💝")
+@bot.command()
+async def RobuxLeaderBoard(ctx):
+    """Affiche le topboard complet des donations dans le salon courant."""
+    embed = build_scoreboard_embed()
     await ctx.send(embed=embed)
 
 # ==========================================
