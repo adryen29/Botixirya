@@ -1139,18 +1139,34 @@ async def check_bans():
 @tasks.loop(minutes=20)
 async def enforce_permissions():
     for guild in bot.guilds:
-        unverified_role = guild.get_role(ROLE_UNVERIFIED_ID)
-        raider_role     = guild.get_role(RAIDER_ROLE_ID)
-        muted_role      = guild.get_role(MUTED_ROLE_ID)
+        unverified_role    = guild.get_role(ROLE_UNVERIFIED_ID)
+        raider_role        = guild.get_role(RAIDER_ROLE_ID)
+        muted_role         = guild.get_role(MUTED_ROLE_ID)
+        roblox_linked_role = guild.get_role(ROLE_ROBLOX_LINKED_ID)
 
         for channel in guild.channels:
+
+            # --- Unverified : exception SAUF le salon roblox-verify ---
             if unverified_role:
-                is_exception = (
+                is_unverified_exception = (
                     channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL
                     or channel.id == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                     or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                 )
-                if is_exception:
+                # Bloque explicitement le salon roblox-verify pour unverified
+                if channel.id == ROBLOX_VERIFY_CHANNEL_ID:
+                    target_ow = channel.overwrites_for(unverified_role)
+                    if target_ow.read_messages is not False:
+                        try:
+                            await channel.set_permissions(
+                                unverified_role,
+                                read_messages=False,
+                                send_messages=False,
+                                reason="enforce_permissions : unverified bloqué dans roblox-verify"
+                            )
+                        except:
+                            pass
+                elif is_unverified_exception:
                     target_ow = channel.overwrites_for(unverified_role)
                     if target_ow.read_messages is not True:
                         try:
@@ -1175,6 +1191,7 @@ async def enforce_permissions():
                         except:
                             pass
 
+            # --- Raider : tout bloqué ---
             if raider_role:
                 target_ow = channel.overwrites_for(raider_role)
                 if target_ow.read_messages is not False:
@@ -1188,6 +1205,7 @@ async def enforce_permissions():
                     except:
                         pass
 
+            # --- Muted : pas d'envoi ---
             if muted_role:
                 target_ow = channel.overwrites_for(muted_role)
                 if target_ow.send_messages is not False:
@@ -1200,11 +1218,23 @@ async def enforce_permissions():
                     except:
                         pass
 
-            # Rôle Roblox lié : accès uniquement au salon de vérification
-            roblox_linked_role = guild.get_role(ROLE_ROBLOX_LINKED_ID)
+            # --- Roblox lié : uniquement roblox-verify, bloqué partout ailleurs ---
             if roblox_linked_role:
                 is_verify_channel = (channel.id == ROBLOX_VERIFY_CHANNEL_ID)
-                if is_verify_channel:
+                # Bloque explicitement le salon unverified-exception pour roblox-linked
+                if channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY:
+                    target_ow = channel.overwrites_for(roblox_linked_role)
+                    if target_ow.read_messages is not False:
+                        try:
+                            await channel.set_permissions(
+                                roblox_linked_role,
+                                read_messages=False,
+                                send_messages=False,
+                                reason="enforce_permissions : roblox-lié bloqué dans salon unverified"
+                            )
+                        except:
+                            pass
+                elif is_verify_channel:
                     target_ow = channel.overwrites_for(roblox_linked_role)
                     if target_ow.read_messages is not True:
                         try:
