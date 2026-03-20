@@ -1565,8 +1565,7 @@ async def help(ctx):
     embed.add_field(name="💸 Donations", value=(
         f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox.\n"
         f"**{COMMAND_PREFIX}RobuxLeaderBoard** : Affiche le topboard complet dans le salon courant.\n"
-        f"**{COMMAND_PREFIX}RobuxDonatedProfile @user** : Profil de donation d'un membre (si dans le topboard).\n"
-        f"**{COMMAND_PREFIX}RemoveTopBoardRobux @user [montant]** : Retire des Robux du total d'un donateur. *(Owner)*"
+        f"**{COMMAND_PREFIX}RobuxDonatedProfile @user** : Profil de donation d'un membre (si dans le topboard)."
     ), inline=False)
 
     if not is_membre or is_owner:
@@ -1584,20 +1583,20 @@ async def help(ctx):
             f"**{COMMAND_PREFIX}mute @user [raison]** : Mute.\n"
             f"**{COMMAND_PREFIX}unmute @user** : Unmute."
         ), inline=False)
-        embed.add_field(name="🎫 Tickets", value=(
-            f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
-            f"→ Configure un point de création de tickets dans le salon spécifié."
-        ), inline=False)
 
     if is_owner:
-        embed.add_field(name="👑 Owner", value=(
+        embed.add_field(name="👑 Owner — Général", value=(
             f"**{COMMAND_PREFIX}kill** : Éteint le bot.\n"
             f"**{COMMAND_PREFIX}giveaway [min] [gagnants] [prix] [condition]** : Lance un giveaway.\n"
             f"**{COMMAND_PREFIX}safe @user** : Lève la quarantaine + whiteliste.\n"
             f"**{COMMAND_PREFIX}removesafe @user** : Remet sous surveillance anti-raid.\n"
             f"→ Restauration des rôles via bouton dans <#{ROLE_BACKUP_CHANNEL_ID}>."
         ), inline=False)
-        embed.add_field(name="💰 Tableau de rémunération", value=(
+        embed.add_field(name="🎫 Owner — Tickets", value=(
+            f"**{COMMAND_PREFIX}TicketCreatingChannel [category_id] [logs_id] [Message] [InsideMessage] [channel_id]**\n"
+            f"→ Configure un point de création de tickets dans le salon spécifié."
+        ), inline=False)
+        embed.add_field(name="💰 Owner — Tableau de rémunération", value=(
             f"**{COMMAND_PREFIX}SetTableChannel** : Définit le salon d'affichage.\n"
             f"**{COMMAND_PREFIX}AddTableLine @user [valeur] [profession]** : Ajoute une ligne.\n"
             f"**{COMMAND_PREFIX}SetTableValue @user [valeur]** : Met à jour (TotalValue += valeur).\n"
@@ -1605,11 +1604,12 @@ async def help(ctx):
             f"**{COMMAND_PREFIX}GetTableUserValue @user (colonne)** : Affiche les données.\n"
             f"→ Colonnes : `value`, `total`, `profession`, `time`"
         ), inline=False)
-        embed.add_field(name="💾 Backup", value=(
-            f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
-            f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup."
+        embed.add_field(name="💸 Owner — Donations", value=(
+            f"**{COMMAND_PREFIX}RemoveTopBoardRobux [pseudo] [montant]** : Retire des Robux du total d'un donateur."
         ), inline=False)
-        embed.add_field(name="🔧 Setup", value=(
+        embed.add_field(name="💾 Owner — Backup & Setup", value=(
+            f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
+            f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup.\n"
             f"**{COMMAND_PREFIX}setuprobloxverify** : Envoie le message de vérification Roblox dans le salon dédié."
         ), inline=False)
 
