@@ -1274,7 +1274,9 @@ async def help(ctx):
     ), inline=False)
     embed.add_field(name="💸 Donations", value=(
         f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox.\n"
-        f"**{COMMAND_PREFIX}RobuxLeaderBoard** : Affiche le topboard complet des donations dans le salon courant."
+        f"**{COMMAND_PREFIX}RobuxLeaderBoard** : Affiche le topboard complet dans le salon courant.\n"
+        f"**{COMMAND_PREFIX}RobuxDonatedProfile @user** : Profil de donation d'un membre (si dans le topboard).\n"
+        f"**{COMMAND_PREFIX}RemoveTopBoardRobux @user [montant]** : Retire des Robux du total d'un donateur. *(Owner)*"
     ), inline=False)
 
     if not is_membre or is_owner:
@@ -1770,6 +1772,100 @@ async def scoreboard(ctx):
 async def RobuxLeaderBoard(ctx):
     """Affiche le topboard complet des donations dans le salon courant."""
     embed = build_scoreboard_embed()
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def RemoveTopBoardRobux(ctx, user: discord.Member, amount: int):
+    """Retire un montant de Robux du total d'un donateur (Owner uniquement)."""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
+
+    uid = str(user.id)
+    if uid not in donations_data:
+        return await ctx.send(f"❌ {user.mention} n'est pas dans le topboard.")
+
+    if amount <= 0:
+        return await ctx.send("❌ Le montant doit être supérieur à 0.")
+
+    old_total = donations_data[uid]["total"]
+    new_total = max(0, old_total - amount)
+    donations_data[uid]["total"] = new_total
+
+    await save_donations_to_discord()
+    await refresh_scoreboard()
+
+    embed = discord.Embed(
+        title="✂️ Robux retirés du Topboard",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Utilisateur", value=user.mention, inline=True)
+    embed.add_field(name="Retiré", value=f"**{amount:,}** Robux".replace(",", " "), inline=True)
+    embed.add_field(name="Ancien total", value=f"**{old_total:,}** Robux".replace(",", " "), inline=True)
+    embed.add_field(name="Nouveau total", value=f"**{new_total:,}** Robux".replace(",", " "), inline=True)
+    embed.set_footer(text=f"Modifié par {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def RobuxDonatedProfile(ctx, user: discord.Member):
+    """Affiche le profil de donation d'un membre s'il est dans le topboard."""
+    uid = str(user.id)
+
+    if uid not in donations_data:
+        return  # Aucun message si pas dans le topboard
+
+    entry = donations_data[uid]
+    total = entry.get("total", 0)
+
+    # Calcul du rang
+    sorted_donors = sorted(
+        donations_data.items(),
+        key=lambda x: x[1].get("total", 0),
+        reverse=True
+    )
+    rank = next((i + 1 for i, (u, _) in enumerate(sorted_donors) if u == uid), "?")
+
+    # Médaille selon le rang
+    if rank == 1:
+        medal = "🥇"
+    elif rank == 2:
+        medal = "🥈"
+    elif rank == 3:
+        medal = "🥉"
+    elif isinstance(rank, int) and rank <= 10:
+        medal = "🏅"
+    else:
+        medal = "💸"
+
+    # Pourcentage du total général
+    grand_total = sum(e.get("total", 0) for e in donations_data.values())
+    percentage = round((total / grand_total) * 100, 1) if grand_total > 0 else 0
+
+    # Barre de contribution
+    bar_length = 20
+    filled = int(bar_length * percentage / 100)
+    bar = "█" * filled + "░" * (bar_length - filled)
+
+    embed = discord.Embed(
+        title=f"{medal} Profil Donation — {entry.get('username', user.display_name)}",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(
+        name="💰 Total donné",
+        value=f"**{total:,}** Robux".replace(",", " "),
+        inline=True
+    )
+    embed.add_field(
+        name="🏆 Rang",
+        value=f"**#{rank}** sur {len(donations_data)}",
+        inline=True
+    )
+    embed.add_field(
+        name="📊 Contribution",
+        value=f"`{bar}` **{percentage}%**\ndu total des donations",
+        inline=False
+    )
+    embed.set_footer(text="💝 Merci pour ton soutien à Aavixyria !")
     await ctx.send(embed=embed)
 
 # ==========================================
