@@ -12,6 +12,7 @@ import uuid
 import math
 import aiohttp
 from flask import Flask, request
+import requests as req_lib
 from threading import Thread
 
 # ==========================================
@@ -74,6 +75,14 @@ XP_MAX = 25             # XP maximum par message
 DONATION_SCOREBOARD_CHANNEL_ID = 1484302892059066538  # Salon affichage scoreboard
 DONATION_MEMORY_CHANNEL_ID = 1484303351649665116      # Salon logs/sauvegarde donations
 DONATION_SECRET = os.getenv("DONATION_SECRET", "change_moi")  # Token secret Roblox → bot
+
+# --- Vérification OAuth Roblox ---
+ROBLOX_CLIENT_ID     = "4841751639344220253"
+ROBLOX_CLIENT_SECRET = os.getenv("ROBLOX_CLIENT_SECRET", "")
+ROBLOX_REDIRECT_URI  = "https://vulnerable-angelfish-aavixyria-79722b21.koyeb.app/roblox/callback"
+ROLE_ROBLOX_LINKED_ID    = 1484610496861700247   # Rôle attribué après liaison Roblox
+ROBLOX_VERIFY_CHANNEL_ID = 1484611746101596351   # Seul salon visible par ce rôle
+ROBLOX_LINKS_CHANNEL_ID  = 1484617094531387424   # Mémoire des liaisons Discord ↔ Roblox
 # ==========================================
 
 # --- État global ---
@@ -97,6 +106,10 @@ slots_cooldowns = {}    # {user_id: last_slots_timestamp}
 # --- Donations ---
 donations_data = {}     # {user_id: {"username": str, "total": int}}
 scoreboard_message_id = None
+
+# --- OAuth Roblox ---
+oauth_states  = {}       # {state: discord_user_id} — temporaire pendant le flux OAuth
+roblox_links  = {}       # {discord_user_id: {"roblox_id": str, "roblox_username": str}}
 # ==========================================
 
 app = Flask('')
@@ -132,6 +145,166 @@ def receive_donation():
     asyncio.run_coroutine_threadsafe(refresh_scoreboard(), bot.loop)
 
     return {"success": True, "total": donations_data[user_id]["total"]}, 200
+
+@app.route('/roblox/callback')
+def roblox_callback():
+    import requests as req_lib
+    code  = request.args.get("code", "")
+    state = request.args.get("state", "")
+
+    if not code or not state:
+        return "<h2>❌ Paramètres manquants.</h2>", 400
+
+    discord_user_id = oauth_states.pop(state, None)
+    if not discord_user_id:
+        return "<h2>❌ Session expirée ou invalide. Recommence depuis Discord.</h2>", 400
+
+    # Échange le code contre un token
+    try:
+        token_resp = req_lib.post(
+            "https://apis.roblox.com/oauth/v1/token",
+            data={
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  ROBLOX_REDIRECT_URI,
+                "client_id":     ROBLOX_CLIENT_ID,
+                "client_secret": ROBLOX_CLIENT_SECRET,
+            },
+            timeout=10
+        )
+        token_data = token_resp.json()
+        access_token = token_data.get("access_token")
+        if not access_token:
+            return "<h2>❌ Impossible d'obtenir le token Roblox.</h2>", 400
+    except Exception as e:
+        return f"<h2>❌ Erreur token : {e}</h2>", 500
+
+    # Récupère les infos du compte Roblox
+    try:
+        user_resp = req_lib.get(
+            "https://apis.roblox.com/oauth/v1/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10
+        )
+        roblox_info = user_resp.json()
+        roblox_id       = roblox_info.get("sub", "?")
+        roblox_username = roblox_info.get("preferred_username", "Inconnu")
+    except Exception as e:
+        return f"<h2>❌ Erreur profil Roblox : {e}</h2>", 500
+
+    # Attribue le rôle dans Discord
+    asyncio.run_coroutine_threadsafe(
+        assign_roblox_role(discord_user_id, roblox_id, roblox_username),
+        bot.loop
+    )
+
+    return f"""
+    <html><body style="font-family:sans-serif;text-align:center;padding:60px;background:#1a1a2e;color:white;">
+    <h1>✅ Compte Roblox lié !</h1>
+    <p>Bienvenue <strong>{roblox_username}</strong> !</p>
+    <p>Retourne sur Discord pour continuer la vérification.</p>
+    </body></html>
+    """
+
+
+async def save_roblox_links():
+    chan = bot.get_channel(ROBLOX_LINKS_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(roblox_links, ensure_ascii=False)
+    async for msg in chan.history(limit=20):
+        if msg.content.startswith("ROBLOX_LINKS|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"ROBLOX_LINKS|{payload}")
+
+async def load_roblox_links():
+    global roblox_links
+    chan = bot.get_channel(ROBLOX_LINKS_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=20):
+        if msg.content.startswith("ROBLOX_LINKS|"):
+            try:
+                roblox_links = json.loads(msg.content[len("ROBLOX_LINKS|"):])
+            except:
+                roblox_links = {}
+            break
+
+
+async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_username: str):
+    global roblox_links
+
+    # Vérifie si ce compte Roblox est déjà lié à quelqu'un d'autre
+    for uid, data in roblox_links.items():
+        if data.get("roblox_id") == roblox_id and int(uid) != discord_user_id:
+            chan = bot.get_channel(ROBLOX_LINKS_CHANNEL_ID)
+            if chan:
+                await chan.send(
+                    f"⚠️ **Tentative de double liaison** : "
+                    f"<@{discord_user_id}> a tenté de lier `{roblox_username}` "
+                    f"déjà lié à <@{uid}>."
+                )
+            return
+
+    for guild in bot.guilds:
+        member = guild.get_member(discord_user_id)
+        if not member:
+            try:
+                member = await guild.fetch_member(discord_user_id)
+            except:
+                continue
+
+        linked_role     = guild.get_role(ROLE_ROBLOX_LINKED_ID)
+        unverified_role = guild.get_role(ROLE_UNVERIFIED_ID)
+
+        verified_role = guild.get_role(ROLE_VERIFIED_ID)
+
+        try:
+            if linked_role:
+                await member.add_roles(linked_role, reason="Liaison compte Roblox OAuth")
+            if unverified_role and unverified_role in member.roles:
+                await member.remove_roles(unverified_role, reason="Liaison compte Roblox OAuth")
+        except Exception as e:
+            await send_log(f"⚠️ Erreur attribution rôle OAuth : {e}")
+            return
+
+        # Vérification Roblox complète → donne Membre, retire le rôle de liaison
+        try:
+            if verified_role:
+                await member.add_roles(verified_role, reason="Vérification Roblox complète")
+            if linked_role and linked_role in member.roles:
+                await member.remove_roles(linked_role, reason="Vérification Roblox complète")
+        except Exception as e:
+            await send_log(f"⚠️ Erreur attribution rôle Membre OAuth : {e}")
+
+        # Sauvegarde la liaison
+        roblox_links[str(discord_user_id)] = {
+            "roblox_id":       roblox_id,
+            "roblox_username": roblox_username,
+            "linked_at":       discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M")
+        }
+        await save_roblox_links()
+
+        await send_log(
+            f"🔗 **Roblox lié** : {member.mention} → "
+            f"`{roblox_username}` (ID : `{roblox_id}`)"
+        )
+
+        # DM de confirmation
+        try:
+            await member.send(
+                f"✅ **Compte Roblox lié avec succès !**\n"
+                f"Roblox : **{roblox_username}**\n"
+                f"Tu peux maintenant accéder au salon de vérification sur le serveur."
+            )
+        except:
+            pass
+        break
+
 
 def run():
     port = int(os.environ.get("PORT", 8000))
@@ -701,20 +874,52 @@ class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="S'identifier ✅", style=discord.ButtonStyle.success, custom_id="verify_user")
+    @discord.ui.button(label="S'identifier avec Roblox 🎮", style=discord.ButtonStyle.success, custom_id="verify_user")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        linked_role = interaction.guild.get_role(ROLE_ROBLOX_LINKED_ID)
         verified_role = interaction.guild.get_role(ROLE_VERIFIED_ID)
-        unverified_role = interaction.guild.get_role(ROLE_UNVERIFIED_ID)
-        if verified_role in interaction.user.roles:
-            return await interaction.response.send_message("Tu es déjà vérifié !", ephemeral=True)
-        try:
-            await interaction.user.add_roles(verified_role)
-            if unverified_role in interaction.user.roles:
-                await interaction.user.remove_roles(unverified_role)
-            await interaction.response.send_message("Vérification réussie !", ephemeral=True)
-            await send_log(f"✅ **Vérification** : {interaction.user.mention}")
-        except:
-            await interaction.response.send_message("Erreur de rôle.", ephemeral=True)
+
+        # Déjà lié ou vérifié
+        if linked_role and linked_role in interaction.user.roles:
+            return await interaction.response.send_message(
+                "✅ Ton compte Roblox est déjà lié !", ephemeral=True
+            )
+        if verified_role and verified_role in interaction.user.roles:
+            return await interaction.response.send_message(
+                "✅ Tu es déjà vérifié !", ephemeral=True
+            )
+
+        # Génère un state unique pour ce membre
+        state = str(uuid.uuid4())
+        oauth_states[state] = interaction.user.id
+
+        # Construit l'URL OAuth Roblox
+        oauth_url = (
+            f"https://apis.roblox.com/oauth/v1/authorize"
+            f"?client_id={ROBLOX_CLIENT_ID}"
+            f"&redirect_uri={ROBLOX_REDIRECT_URI}"
+            f"&response_type=code"
+            f"&scope=openid+profile"
+            f"&state={state}"
+        )
+
+        embed = discord.Embed(
+            title="🔗 Liaison compte Roblox",
+            description=(
+                "Clique sur le bouton ci-dessous pour lier ton compte Roblox.\n\n"
+                "Tu seras redirigé vers Roblox pour autoriser la connexion.\n"
+                "Une fois terminé, reviens sur Discord !"
+            ),
+            color=discord.Color.blurple()
+        )
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label="Lier mon compte Roblox",
+            url=oauth_url,
+            style=discord.ButtonStyle.link,
+            emoji="🎮"
+        ))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class GiveawayView(discord.ui.View):
@@ -995,6 +1200,35 @@ async def enforce_permissions():
                     except:
                         pass
 
+            # Rôle Roblox lié : accès uniquement au salon de vérification
+            roblox_linked_role = guild.get_role(ROLE_ROBLOX_LINKED_ID)
+            if roblox_linked_role:
+                is_verify_channel = (channel.id == ROBLOX_VERIFY_CHANNEL_ID)
+                if is_verify_channel:
+                    target_ow = channel.overwrites_for(roblox_linked_role)
+                    if target_ow.read_messages is not True:
+                        try:
+                            await channel.set_permissions(
+                                roblox_linked_role,
+                                read_messages=True,
+                                send_messages=True,
+                                reason="enforce_permissions : roblox-lié autorisé dans vérification"
+                            )
+                        except:
+                            pass
+                else:
+                    target_ow = channel.overwrites_for(roblox_linked_role)
+                    if target_ow.read_messages is not False:
+                        try:
+                            await channel.set_permissions(
+                                roblox_linked_role,
+                                read_messages=False,
+                                send_messages=False,
+                                reason="enforce_permissions : roblox-lié bloqué hors vérification"
+                            )
+                        except:
+                            pass
+
         await asyncio.sleep(0.5)
 
 async def send_funds_error(msg: str):
@@ -1149,6 +1383,7 @@ async def on_ready():
     await load_xp_from_discord()
     await load_donations_from_discord()
     await refresh_scoreboard()
+    await load_roblox_links()
 
     if not check_giveaways.is_running():
         check_giveaways.start()
@@ -1271,6 +1506,9 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}top3** : Podium d'activité du jour.\n"
         f"**{COMMAND_PREFIX}daily** : Récompense quotidienne (reset à minuit).\n"
         f"**{COMMAND_PREFIX}streak (@user)** : Streak de daily consécutifs."
+    ), inline=False)
+    embed.add_field(name="🎮 Roblox", value=(
+        f"**{COMMAND_PREFIX}robloxprofile (@user / pseudo)** : Affiche le profil Roblox lié d'un membre. Sans argument = ton propre profil."
     ), inline=False)
     embed.add_field(name="💸 Donations", value=(
         f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox.\n"
@@ -1766,6 +2004,61 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
 async def scoreboard(ctx):
     """Affiche le classement des donateurs Roblox."""
     embed = build_scoreboard_embed()
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def robloxprofile(ctx, *, user_input: str = None):
+    """Affiche le profil Roblox lié d'un membre. Optionnel : @mention ou pseudo Discord."""
+    target_member = None
+
+    if user_input is None:
+        target_member = ctx.author
+    else:
+        # Essaie de convertir en Member (mention ou ID)
+        try:
+            converter = commands.MemberConverter()
+            target_member = await converter.convert(ctx, user_input)
+        except:
+            # Cherche par nom d'affichage ou username
+            user_lower = user_input.lower()
+            for m in ctx.guild.members:
+                if m.display_name.lower() == user_lower or m.name.lower() == user_lower:
+                    target_member = m
+                    break
+
+    if not target_member:
+        return await ctx.send(f"❌ Membre `{user_input}` introuvable.")
+
+    uid = str(target_member.id)
+    link_data = roblox_links.get(uid)
+
+    if not link_data:
+        return await ctx.send(
+            f"❌ **{target_member.display_name}** n'a pas encore lié son compte Roblox."
+        )
+
+    roblox_username = link_data.get("roblox_username", "Inconnu")
+    roblox_id       = link_data.get("roblox_id", "?")
+    linked_at       = link_data.get("linked_at", "Inconnu")
+
+    # Récupère l'avatar Roblox
+    avatar_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={roblox_id}&size=150x150&format=Png"
+
+    embed = discord.Embed(
+        title=f"🎮 Profil Roblox — {roblox_username}",
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=target_member.display_avatar.url)
+    embed.add_field(name="👤 Discord",         value=target_member.mention,  inline=True)
+    embed.add_field(name="🎮 Pseudo Roblox",   value=f"**{roblox_username}**", inline=True)
+    embed.add_field(name="🆔 Roblox ID",       value=f"`{roblox_id}`",        inline=True)
+    embed.add_field(name="📅 Lié le",          value=linked_at,               inline=True)
+    embed.add_field(
+        name="🔗 Profil",
+        value=f"[Voir sur Roblox](https://www.roblox.com/users/{roblox_id}/profile)",
+        inline=True
+    )
+    embed.set_footer(text="Liaison OAuth Roblox officielle ✅")
     await ctx.send(embed=embed)
 
 @bot.command()
