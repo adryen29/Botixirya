@@ -1563,7 +1563,6 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}robloxprofile (@user / pseudo)** : Affiche le profil Roblox lié d'un membre. Sans argument = ton propre profil."
     ), inline=False)
     embed.add_field(name="💸 Donations", value=(
-        f"**{COMMAND_PREFIX}scoreboard** : Classement des donateurs Roblox.\n"
         f"**{COMMAND_PREFIX}RobuxLeaderBoard** : Affiche le topboard complet dans le salon courant.\n"
         f"**{COMMAND_PREFIX}RobuxDonatedProfile @user** : Profil de donation d'un membre (si dans le topboard)."
     ), inline=False)
@@ -2079,12 +2078,6 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
 # ==========================================
 
 @bot.command()
-async def scoreboard(ctx):
-    """Affiche le classement des donateurs Roblox."""
-    embed = build_scoreboard_embed()
-    await ctx.send(embed=embed)
-
-@bot.command()
 async def robloxprofile(ctx, *, user_input: str = None):
     """Affiche le profil Roblox lié d'un membre. Optionnel : @mention ou pseudo Discord."""
     target_member = None
@@ -2184,15 +2177,48 @@ async def RemoveTopBoardRobux(ctx, username: str, amount: int):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def RobuxDonatedProfile(ctx, user: discord.Member):
-    """Affiche le profil de donation d'un membre s'il est dans le topboard."""
-    uid = str(user.id)
+async def RobuxDonatedProfile(ctx, *, user_input: str = None):
+    """Affiche le profil de donation. Sans argument = soi-même, sinon @mention ou pseudo Roblox."""
 
-    if uid not in donations_data:
+    # Détermine la cible
+    if user_input is None:
+        # Cherche par l'auteur de la commande dans donations_data
+        uid = None
+        for donor_uid, entry in donations_data.items():
+            if entry.get("username", "").lower() == ctx.author.display_name.lower() or entry.get("username", "").lower() == ctx.author.name.lower():
+                uid = donor_uid
+                break
+        display_name = ctx.author.display_name
+        avatar_url = ctx.author.display_avatar.url
+    else:
+        # Essaie mention/ID Discord
+        uid = None
+        avatar_url = None
+        display_name = user_input
+        try:
+            converter = commands.MemberConverter()
+            member = await converter.convert(ctx, user_input)
+            # Cherche par nom Discord dans donations_data
+            for donor_uid, entry in donations_data.items():
+                if entry.get("username", "").lower() == member.display_name.lower() or entry.get("username", "").lower() == member.name.lower():
+                    uid = donor_uid
+                    break
+            display_name = member.display_name
+            avatar_url = member.display_avatar.url
+        except:
+            # Cherche directement par pseudo Roblox dans donations_data
+            for donor_uid, entry in donations_data.items():
+                if entry.get("username", "").lower() == user_input.lower():
+                    uid = donor_uid
+                    display_name = entry.get("username", user_input)
+                    break
+
+    if not uid or uid not in donations_data:
         return  # Aucun message si pas dans le topboard
 
     entry = donations_data[uid]
     total = entry.get("total", 0)
+    roblox_username = entry.get("username", display_name)
 
     # Calcul du rang
     sorted_donors = sorted(
@@ -2224,10 +2250,11 @@ async def RobuxDonatedProfile(ctx, user: discord.Member):
     bar = "█" * filled + "░" * (bar_length - filled)
 
     embed = discord.Embed(
-        title=f"{medal} Profil Donation — {entry.get('username', user.display_name)}",
+        title=f"{medal} Profil Donation — {roblox_username}",
         color=discord.Color.gold()
     )
-    embed.set_thumbnail(url=user.display_avatar.url)
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
     embed.add_field(
         name="💰 Total donné",
         value=f"**{total:,}** Robux".replace(",", " "),
