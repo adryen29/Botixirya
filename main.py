@@ -259,27 +259,20 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
                 continue
 
         linked_role     = guild.get_role(ROLE_ROBLOX_LINKED_ID)
+        verified_role   = guild.get_role(ROLE_VERIFIED_ID)
         unverified_role = guild.get_role(ROLE_UNVERIFIED_ID)
 
-        verified_role = guild.get_role(ROLE_VERIFIED_ID)
-
-        try:
-            if linked_role:
-                await member.add_roles(linked_role, reason="Liaison compte Roblox OAuth")
-            if unverified_role and unverified_role in member.roles:
-                await member.remove_roles(unverified_role, reason="Liaison compte Roblox OAuth")
-        except Exception as e:
-            await send_log(f"⚠️ Erreur attribution rôle OAuth : {e}")
-            return
-
-        # Vérification Roblox complète → donne Membre, retire le rôle de liaison
+        # Donne le rôle Membre et retire Roblox-Lié + Unverified
         try:
             if verified_role:
                 await member.add_roles(verified_role, reason="Vérification Roblox complète")
             if linked_role and linked_role in member.roles:
                 await member.remove_roles(linked_role, reason="Vérification Roblox complète")
+            if unverified_role and unverified_role in member.roles:
+                await member.remove_roles(unverified_role, reason="Vérification Roblox complète")
         except Exception as e:
             await send_log(f"⚠️ Erreur attribution rôle Membre OAuth : {e}")
+            return
 
         # Sauvegarde la liaison
         roblox_links[str(discord_user_id)] = {
@@ -871,29 +864,67 @@ class RestoreRolesView(discord.ui.View):
 # ==========================================
 
 class VerifyView(discord.ui.View):
+    """Bouton dans le salon règlement — étape 1 : confirme avoir lu les règles."""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="S'identifier avec Roblox 🎮", style=discord.ButtonStyle.success, custom_id="verify_user")
+    @discord.ui.button(label="J'ai lu le règlement ✅", style=discord.ButtonStyle.success, custom_id="verify_user")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        linked_role = interaction.guild.get_role(ROLE_ROBLOX_LINKED_ID)
-        verified_role = interaction.guild.get_role(ROLE_VERIFIED_ID)
+        linked_role     = interaction.guild.get_role(ROLE_ROBLOX_LINKED_ID)
+        verified_role   = interaction.guild.get_role(ROLE_VERIFIED_ID)
+        unverified_role = interaction.guild.get_role(ROLE_UNVERIFIED_ID)
 
-        # Déjà lié ou vérifié
-        if linked_role and linked_role in interaction.user.roles:
-            return await interaction.response.send_message(
-                "✅ Ton compte Roblox est déjà lié !", ephemeral=True
-            )
+        # Déjà membre
         if verified_role and verified_role in interaction.user.roles:
             return await interaction.response.send_message(
-                "✅ Tu es déjà vérifié !", ephemeral=True
+                "✅ Tu es déjà membre du serveur !", ephemeral=True
+            )
+        # Déjà en cours de vérification Roblox
+        if linked_role and linked_role in interaction.user.roles:
+            return await interaction.response.send_message(
+                "🎮 Tu es déjà en cours de vérification Roblox !\nRends-toi dans le salon de vérification.", ephemeral=True
             )
 
-        # Génère un state unique pour ce membre
+        try:
+            if linked_role:
+                await interaction.user.add_roles(linked_role, reason="Règlement accepté")
+            if unverified_role and unverified_role in interaction.user.roles:
+                await interaction.user.remove_roles(unverified_role, reason="Règlement accepté")
+        except Exception as e:
+            return await interaction.response.send_message(f"❌ Erreur : {e}", ephemeral=True)
+
+        await interaction.response.send_message(
+            "✅ Règlement accepté ! Rends-toi maintenant dans le salon de vérification pour lier ton compte Roblox.",
+            ephemeral=True
+        )
+        await send_log(f"📋 **Règlement accepté** : {interaction.user.mention} — en attente de liaison Roblox.")
+
+
+class RobloxVerifyView(discord.ui.View):
+    """Bouton dans le salon vérification Roblox — étape 2 : lier le compte Roblox."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Lier mon compte Roblox 🎮", style=discord.ButtonStyle.blurple, custom_id="roblox_link_btn")
+    async def roblox_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        linked_role   = interaction.guild.get_role(ROLE_ROBLOX_LINKED_ID)
+        verified_role = interaction.guild.get_role(ROLE_VERIFIED_ID)
+
+        # Déjà membre
+        if verified_role and verified_role in interaction.user.roles:
+            return await interaction.response.send_message(
+                "✅ Ton compte Roblox est déjà lié, tu es membre !", ephemeral=True
+            )
+        # Pas encore passé par le règlement
+        if linked_role and linked_role not in interaction.user.roles:
+            return await interaction.response.send_message(
+                "❌ Tu dois d'abord lire et accepter le règlement.", ephemeral=True
+            )
+
+        # Génère un state unique
         state = str(uuid.uuid4())
         oauth_states[state] = interaction.user.id
 
-        # Construit l'URL OAuth Roblox
         oauth_url = (
             f"https://apis.roblox.com/oauth/v1/authorize"
             f"?client_id={ROBLOX_CLIENT_ID}"
@@ -912,14 +943,14 @@ class VerifyView(discord.ui.View):
             ),
             color=discord.Color.blurple()
         )
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(
-            label="Lier mon compte Roblox",
+        link_view = discord.ui.View()
+        link_view.add_item(discord.ui.Button(
+            label="Connecter avec Roblox",
             url=oauth_url,
             style=discord.ButtonStyle.link,
             emoji="🎮"
         ))
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=link_view, ephemeral=True)
 
 
 class GiveawayView(discord.ui.View):
@@ -1379,6 +1410,7 @@ async def on_ready():
     global current_count, last_user_id, active_counting_channel
     bot.add_view(GiveawayView(bot))
     bot.add_view(VerifyView())
+    bot.add_view(RobloxVerifyView())
     bot.add_view(CloseTicketView())
 
     role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
