@@ -1619,10 +1619,36 @@ async def help(ctx):
             f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
             f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup."
         ), inline=False)
+        embed.add_field(name="🔧 Setup", value=(
+            f"**{COMMAND_PREFIX}setuprobloxverify** : Envoie le message de vérification Roblox dans le salon dédié."
+        ), inline=False)
 
     await ctx.send(embed=embed)
 
 # --- Système ---
+
+@bot.command()
+async def setuprobloxverify(ctx):
+    """Envoie le message de vérification Roblox dans le salon dédié. Owner uniquement."""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
+
+    chan = bot.get_channel(ROBLOX_VERIFY_CHANNEL_ID)
+    if not chan:
+        return await ctx.send("❌ Salon de vérification introuvable.")
+
+    embed = discord.Embed(
+        title="🎮 Vérification Roblox",
+        description=(
+            "Pour accéder au serveur, tu dois lier ton compte Roblox.\n\n"
+            "Clique sur le bouton ci-dessous pour commencer la liaison.\n"
+            "Tu seras redirigé vers Roblox pour autoriser la connexion.\n\n"
+            "Une fois terminé, tu obtiendras automatiquement le rôle **Membre**. ✅"
+        ),
+        color=discord.Color.blurple()
+    )
+    await chan.send(embed=embed, view=RobloxVerifyView())
+    await ctx.send(f"✅ Message de vérification envoyé dans {chan.mention}.", delete_after=5)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
