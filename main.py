@@ -451,11 +451,11 @@ def build_scoreboard_embed():
     p2 = sorted_donors[1] if len(sorted_donors) > 1 else None
     p3 = sorted_donors[2] if len(sorted_donors) > 2 else None
 
-    def fmt_podium(place_label, entry):
+    def fmt_podium(entry):
         if not entry:
-            return f"{place_label}\n*Personne*\n—"
+            return "*Personne*\n—"
         total = f"{entry.get('total', 0):,}".replace(",", " ")
-        return f"{place_label}\n**{entry.get('username', '???')}**\n💰 {total} Robux"
+        return f"**{entry.get('username', '???')}**\n💰 {total} Robux"
 
     embed = discord.Embed(color=discord.Color.gold())
     embed.description = (
@@ -467,9 +467,9 @@ def build_scoreboard_embed():
         "```"
     )
 
-    embed.add_field(name="\u200b", value=fmt_podium("🥈 **2ème Place**", p2[1] if p2 else None), inline=True)
-    embed.add_field(name="\u200b", value=fmt_podium("🥇 **1ère Place**", p1[1] if p1 else None), inline=True)
-    embed.add_field(name="\u200b", value=fmt_podium("🥉 **3ème Place**", p3[1] if p3 else None), inline=True)
+    embed.add_field(name="🥈 2ème Place", value=fmt_podium(p2[1] if p2 else None), inline=True)
+    embed.add_field(name="🥇 1ère Place", value=fmt_podium(p1[1] if p1 else None), inline=True)
+    embed.add_field(name="🥉 3ème Place", value=fmt_podium(p3[1] if p3 else None), inline=True)
     embed.add_field(name="\u200b", value="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
 
     if len(sorted_donors) > 3:
@@ -1775,21 +1775,27 @@ async def RobuxLeaderBoard(ctx):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def RemoveTopBoardRobux(ctx, user: discord.Member, amount: int):
-    """Retire un montant de Robux du total d'un donateur (Owner uniquement)."""
+async def RemoveTopBoardRobux(ctx, username: str, amount: int):
+    """Retire un montant de Robux du total d'un donateur Roblox (Owner uniquement)."""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
-
-    uid = str(user.id)
-    if uid not in donations_data:
-        return await ctx.send(f"❌ {user.mention} n'est pas dans le topboard.")
 
     if amount <= 0:
         return await ctx.send("❌ Le montant doit être supérieur à 0.")
 
-    old_total = donations_data[uid]["total"]
+    # Cherche le donateur par pseudo Roblox (insensible à la casse)
+    target_uid = None
+    for uid, entry in donations_data.items():
+        if entry.get("username", "").lower() == username.lower():
+            target_uid = uid
+            break
+
+    if not target_uid:
+        return await ctx.send(f"❌ Aucun donateur nommé `{username}` dans le topboard.")
+
+    old_total = donations_data[target_uid]["total"]
     new_total = max(0, old_total - amount)
-    donations_data[uid]["total"] = new_total
+    donations_data[target_uid]["total"] = new_total
 
     await save_donations_to_discord()
     await refresh_scoreboard()
@@ -1798,8 +1804,9 @@ async def RemoveTopBoardRobux(ctx, user: discord.Member, amount: int):
         title="✂️ Robux retirés du Topboard",
         color=discord.Color.orange()
     )
-    embed.add_field(name="Utilisateur", value=user.mention, inline=True)
+    embed.add_field(name="Joueur Roblox", value=f"**{username}**", inline=True)
     embed.add_field(name="Retiré", value=f"**{amount:,}** Robux".replace(",", " "), inline=True)
+    embed.add_field(name="​", value="​", inline=True)
     embed.add_field(name="Ancien total", value=f"**{old_total:,}** Robux".replace(",", " "), inline=True)
     embed.add_field(name="Nouveau total", value=f"**{new_total:,}** Robux".replace(",", " "), inline=True)
     embed.set_footer(text=f"Modifié par {ctx.author.display_name}")
