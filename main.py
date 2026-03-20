@@ -1484,6 +1484,17 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.event
+async def on_member_join(member):
+    if member.bot:
+        return
+    unverified_role = member.guild.get_role(ROLE_UNVERIFIED_ID)
+    if unverified_role:
+        try:
+            await member.add_roles(unverified_role, reason="Arrivée sur le serveur")
+        except Exception as e:
+            await send_log(f"⚠️ Impossible d'attribuer Unverified à {member.mention} : {e}")
+
+@bot.event
 async def on_guild_channel_delete(channel):
     guild = channel.guild
     await asyncio.sleep(0.5)
