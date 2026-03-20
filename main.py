@@ -241,13 +241,7 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
     # Vérifie si ce compte Roblox est déjà lié à quelqu'un d'autre
     for uid, data in roblox_links.items():
         if data.get("roblox_id") == roblox_id and int(uid) != discord_user_id:
-            chan = bot.get_channel(ROBLOX_LINKS_CHANNEL_ID)
-            if chan:
-                await chan.send(
-                    f"⚠️ **Tentative de double liaison** : "
-                    f"<@{discord_user_id}> a tenté de lier `{roblox_username}` "
-                    f"déjà lié à <@{uid}>."
-                )
+
             return
 
     for guild in bot.guilds:
@@ -282,10 +276,7 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
         }
         await save_roblox_links()
 
-        await send_log(
-            f"🔗 **Roblox lié** : {member.mention} → "
-            f"`{roblox_username}` (ID : `{roblox_id}`)"
-        )
+
 
         # DM de confirmation
         try:
@@ -897,7 +888,7 @@ class VerifyView(discord.ui.View):
             "✅ Règlement accepté ! Rends-toi maintenant dans le salon de vérification pour lier ton compte Roblox.",
             ephemeral=True
         )
-        await send_log(f"📋 **Règlement accepté** : {interaction.user.mention} — en attente de liaison Roblox.")
+
 
 
 class RobloxVerifyView(discord.ui.View):
@@ -1252,20 +1243,8 @@ async def enforce_permissions():
             # --- Roblox lié : uniquement roblox-verify, bloqué partout ailleurs ---
             if roblox_linked_role:
                 is_verify_channel = (channel.id == ROBLOX_VERIFY_CHANNEL_ID)
-                # Bloque explicitement le salon unverified-exception pour roblox-linked
-                if channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY:
-                    target_ow = channel.overwrites_for(roblox_linked_role)
-                    if target_ow.read_messages is not False:
-                        try:
-                            await channel.set_permissions(
-                                roblox_linked_role,
-                                read_messages=False,
-                                send_messages=False,
-                                reason="enforce_permissions : roblox-lié bloqué dans salon unverified"
-                            )
-                        except:
-                            pass
-                elif is_verify_channel:
+                # Le salon de vérification Roblox est vérifié EN PREMIER
+                if is_verify_channel:
                     target_ow = channel.overwrites_for(roblox_linked_role)
                     if target_ow.read_messages is not True:
                         try:
