@@ -283,7 +283,7 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
             await member.send(
                 f"✅ **Compte Roblox lié avec succès !**\n"
                 f"Roblox : **{roblox_username}**\n"
-                f"Tu peux maintenant accéder au salon de vérification sur le serveur."
+                f"Bienvenue dans notre communauté !"
             )
         except:
             pass
