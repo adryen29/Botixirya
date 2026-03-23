@@ -37,7 +37,7 @@ MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
 BACKUP_SERVER_ID = 1481205788566618115           # Serveur de backup
 
 RAID_THRESHOLD = 3                               # Nb suppressions déclenchant l'anti-raid
-RAID_WINDOW = 30                                 # Fenêtre de temps en secondes
+RAID_WINDOW = 600                                # Fenêtre de temps en secondes (10 minutes)
 
 ROLE_BACKUP_CHANNEL_ID = 1481211118843203647     # Sauvegarde des rôles avant quarantaine
 RAID_LOG_CHANNEL_ID = 1481211696109326466        # Logs des tentatives de raid
@@ -102,6 +102,9 @@ funds_clothing_message_id = None
 xp_data = {}            # {user_id: {"xp": int, "level": int, "streak": int, "last_daily": str, "xp_today": int}}
 xp_cooldowns = {}       # {user_id: last_xp_timestamp}
 slots_cooldowns = {}    # {user_id: last_slots_timestamp}
+
+# --- Anti-raid @everyone ---
+everyone_tracker = {}   # {guild_id: {user_id: [timestamps]}}
 
 # --- Donations ---
 donations_data = {}     # {user_id: {"username": str, "total": int}}
@@ -1442,6 +1445,33 @@ async def on_message(message):
     global current_count, last_user_id, active_counting_channel
     if message.author == bot.user or not message.guild:
         return
+
+    # --- Détection anti-raid @everyone ---
+    if message.mention_everyone and message.author.id != OWNER_ID and message.author.id not in safe_users:
+        member = message.author
+        gid = str(message.guild.id)
+        uid = str(member.id)
+        now = time.time()
+
+        if gid not in everyone_tracker:
+            everyone_tracker[gid] = {}
+        if uid not in everyone_tracker[gid]:
+            everyone_tracker[gid][uid] = []
+
+        # Nettoie les anciens timestamps hors fenêtre
+        everyone_tracker[gid][uid] = [t for t in everyone_tracker[gid][uid] if now - t < RAID_WINDOW]
+        everyone_tracker[gid][uid].append(now)
+
+        # Supprime le message @everyone
+        try:
+            await message.delete()
+        except:
+            pass
+
+        if len(everyone_tracker[gid][uid]) >= 4:
+            everyone_tracker[gid][uid] = []
+            await quarantine_user(message.guild, member)
+            return
 
     member = message.author
     verified_role = message.guild.get_role(ROLE_VERIFIED_ID)
