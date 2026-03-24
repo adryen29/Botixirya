@@ -1447,7 +1447,8 @@ async def on_message(message):
         return
 
     # --- Détection anti-raid @everyone ---
-    if message.mention_everyone and message.author.id != OWNER_ID and message.author.id not in safe_users:
+    has_everyone = message.mention_everyone or "@everyone" in message.content or "@here" in message.content
+    if has_everyone and message.author.id != OWNER_ID and message.author.id not in safe_users:
         member = message.author
         gid = str(message.guild.id)
         uid = str(member.id)
