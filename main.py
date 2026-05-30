@@ -32,6 +32,9 @@ MUTE_LOG_CHANNEL_ID = 1481202820500684841        # Logs mutes
 MUTED_ROLE_ID = 1481203639107325983              # Rôle Muted
 BANS_FILE = "bans.json"
 
+TEMPBAN_LOG_CHANNEL_ID  = 1510401125616980169    # Logs + mémoire tempbans
+TEMPMUTE_LOG_CHANNEL_ID = 1510400362526543934    # Logs + mémoire tempmutes
+
 OWNER_ID = 1339332485930160189                   # ID du propriétaire
 MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
 BACKUP_SERVER_ID = 1481205788566618115           # Serveur de backup
@@ -113,6 +116,53 @@ scoreboard_message_id = None
 # --- OAuth Roblox ---
 oauth_states  = {}       # {state: discord_user_id} — temporaire pendant le flux OAuth
 roblox_links  = {}       # {discord_user_id: {"roblox_id": str, "roblox_username": str}}
+
+# --- TempBan / TempMute ---
+tempban_data  = {}       # {"guild_id:user_id": {user_id, guild_id, end_time, reason, moderator_id, username}}
+tempmute_data = {}       # même structure
+# ==========================================
+
+# ==========================================
+# HELPERS — DURÉE
+# ==========================================
+
+def parse_duration(duration_str: str):
+    """
+    Parse une durée comme 10m, 2h, 3d.
+    Retourne le nombre de secondes ou None si invalide.
+    """
+    match = re.fullmatch(r'(\d+)([mhd])', duration_str.lower().strip())
+    if not match:
+        return None
+    value = int(match.group(1))
+    unit  = match.group(2)
+    if value <= 0:
+        return None
+    if unit == 'm':
+        return value * 60
+    if unit == 'h':
+        return value * 3600
+    if unit == 'd':
+        return value * 86400
+    return None
+
+
+def format_duration(seconds: int) -> str:
+    """Formate un nombre de secondes en chaîne lisible (ex: 2h30m, 1d12h)."""
+    seconds = int(seconds)
+    days    = seconds // 86400
+    hours   = (seconds % 86400) // 3600
+    minutes = (seconds % 3600)  // 60
+
+    parts = []
+    if days:
+        parts.append(f"{days}j")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes and not days:          # on n'affiche pas les minutes si > 1 jour
+        parts.append(f"{minutes}m")
+    return "".join(parts) if parts else "< 1m"
+
 # ==========================================
 
 app = Flask('')
@@ -162,7 +212,6 @@ def roblox_callback():
     if not discord_user_id:
         return "<h2>❌ Session expirée ou invalide. Recommence depuis Discord.</h2>", 400
 
-    # Échange le code contre un token
     try:
         token_resp = req_lib.post(
             "https://apis.roblox.com/oauth/v1/token",
@@ -182,7 +231,6 @@ def roblox_callback():
     except Exception as e:
         return f"<h2>❌ Erreur token : {e}</h2>", 500
 
-    # Récupère les infos du compte Roblox
     try:
         user_resp = req_lib.get(
             "https://apis.roblox.com/oauth/v1/userinfo",
@@ -195,7 +243,6 @@ def roblox_callback():
     except Exception as e:
         return f"<h2>❌ Erreur profil Roblox : {e}</h2>", 500
 
-    # Attribue le rôle dans Discord
     asyncio.run_coroutine_threadsafe(
         assign_roblox_role(discord_user_id, roblox_id, roblox_username),
         bot.loop
@@ -241,10 +288,8 @@ async def load_roblox_links():
 async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_username: str):
     global roblox_links
 
-    # Vérifie si ce compte Roblox est déjà lié à quelqu'un d'autre
     for uid, data in roblox_links.items():
         if data.get("roblox_id") == roblox_id and int(uid) != discord_user_id:
-
             return
 
     for guild in bot.guilds:
@@ -259,7 +304,6 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
         verified_role   = guild.get_role(ROLE_VERIFIED_ID)
         unverified_role = guild.get_role(ROLE_UNVERIFIED_ID)
 
-        # Donne le rôle Membre et retire Roblox-Lié + Unverified
         try:
             if verified_role:
                 await member.add_roles(verified_role, reason="Vérification Roblox complète")
@@ -271,7 +315,6 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
             await send_log(f"⚠️ Erreur attribution rôle Membre OAuth : {e}")
             return
 
-        # Sauvegarde la liaison
         roblox_links[str(discord_user_id)] = {
             "roblox_id":       roblox_id,
             "roblox_username": roblox_username,
@@ -279,9 +322,6 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
         }
         await save_roblox_links()
 
-
-
-        # DM de confirmation
         try:
             await member.send(
                 f"✅ **Compte Roblox lié avec succès !**\n"
@@ -355,6 +395,68 @@ async def send_log(content):
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if channel:
         await channel.send(content)
+
+# ==========================================
+# TEMPBAN — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_tempbans_to_discord():
+    chan = bot.get_channel(TEMPBAN_LOG_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(tempban_data, ensure_ascii=False)
+    async for msg in chan.history(limit=100):
+        if msg.content.startswith("TEMPBAN_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"TEMPBAN_SAVE|{payload}")
+
+async def load_tempbans_from_discord():
+    global tempban_data
+    chan = bot.get_channel(TEMPBAN_LOG_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=100):
+        if msg.content.startswith("TEMPBAN_SAVE|"):
+            try:
+                tempban_data = json.loads(msg.content[len("TEMPBAN_SAVE|"):])
+            except:
+                tempban_data = {}
+            break
+
+# ==========================================
+# TEMPMUTE — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_tempmutes_to_discord():
+    chan = bot.get_channel(TEMPMUTE_LOG_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(tempmute_data, ensure_ascii=False)
+    async for msg in chan.history(limit=100):
+        if msg.content.startswith("TEMPMUTE_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"TEMPMUTE_SAVE|{payload}")
+
+async def load_tempmutes_from_discord():
+    global tempmute_data
+    chan = bot.get_channel(TEMPMUTE_LOG_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=100):
+        if msg.content.startswith("TEMPMUTE_SAVE|"):
+            try:
+                tempmute_data = json.loads(msg.content[len("TEMPMUTE_SAVE|"):])
+            except:
+                tempmute_data = {}
+            break
 
 # ==========================================
 # SYSTÈME DE TICKETS — MÉMOIRE
@@ -600,7 +702,6 @@ async def load_donations_from_discord():
             break
 
 def build_scoreboard_embed():
-    """Construit l'embed du topboard donations."""
     sorted_donors = sorted(
         donations_data.items(),
         key=lambda x: x[1].get("total", 0),
@@ -858,7 +959,6 @@ class RestoreRolesView(discord.ui.View):
 # ==========================================
 
 class VerifyView(discord.ui.View):
-    """Bouton dans le salon règlement — étape 1 : confirme avoir lu les règles."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -868,12 +968,10 @@ class VerifyView(discord.ui.View):
         verified_role   = interaction.guild.get_role(ROLE_VERIFIED_ID)
         unverified_role = interaction.guild.get_role(ROLE_UNVERIFIED_ID)
 
-        # Déjà membre
         if verified_role and verified_role in interaction.user.roles:
             return await interaction.response.send_message(
                 "✅ Tu es déjà membre du serveur !", ephemeral=True
             )
-        # Déjà en cours de vérification Roblox
         if linked_role and linked_role in interaction.user.roles:
             return await interaction.response.send_message(
                 "🎮 Tu es déjà en cours de vérification Roblox !\nRends-toi dans le salon de vérification.", ephemeral=True
@@ -893,9 +991,7 @@ class VerifyView(discord.ui.View):
         )
 
 
-
 class RobloxVerifyView(discord.ui.View):
-    """Bouton dans le salon vérification Roblox — étape 2 : lier le compte Roblox."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -904,18 +1000,15 @@ class RobloxVerifyView(discord.ui.View):
         linked_role   = interaction.guild.get_role(ROLE_ROBLOX_LINKED_ID)
         verified_role = interaction.guild.get_role(ROLE_VERIFIED_ID)
 
-        # Déjà membre
         if verified_role and verified_role in interaction.user.roles:
             return await interaction.response.send_message(
                 "✅ Ton compte Roblox est déjà lié, tu es membre !", ephemeral=True
             )
-        # Pas encore passé par le règlement
         if linked_role and linked_role not in interaction.user.roles:
             return await interaction.response.send_message(
                 "❌ Tu dois d'abord lire et accepter le règlement.", ephemeral=True
             )
 
-        # Génère un state unique
         state = str(uuid.uuid4())
         oauth_states[state] = interaction.user.id
 
@@ -1161,6 +1254,117 @@ async def check_bans():
     if to_remove:
         save_bans(bans)
 
+@tasks.loop(seconds=30)
+async def check_tempbans():
+    """Vérifie les tempbans expirés et débannit automatiquement."""
+    now = time.time()
+    to_remove = []
+
+    for key, info in list(tempban_data.items()):
+        if now >= info["end_time"]:
+            guild = bot.get_guild(info["guild_id"])
+            if guild:
+                try:
+                    user = await bot.fetch_user(info["user_id"])
+                    await guild.unban(user, reason="TempBan expiré — unban automatique")
+
+                    log_chan = bot.get_channel(TEMPBAN_LOG_CHANNEL_ID)
+                    if log_chan:
+                        from datetime import datetime, timezone
+                        embed = discord.Embed(
+                            title="⏱️ TempBan expiré — Unban automatique",
+                            color=discord.Color.green()
+                        )
+                        embed.add_field(
+                            name="Utilisateur",
+                            value=f"{info.get('username', str(user))} (`{user.id}`)",
+                            inline=True
+                        )
+                        embed.add_field(
+                            name="Raison initiale",
+                            value=info.get("reason", "—"),
+                            inline=True
+                        )
+                        embed.add_field(
+                            name="Banni par",
+                            value=f"<@{info.get('moderator_id', 0)}>",
+                            inline=True
+                        )
+                        embed.set_footer(
+                            text=f"Unban automatique — {datetime.now(timezone.utc).strftime('%d/%m/%Y à %H:%M')} UTC"
+                        )
+                        await log_chan.send(embed=embed)
+                except Exception:
+                    pass
+            to_remove.append(key)
+
+    if to_remove:
+        for key in to_remove:
+            tempban_data.pop(key, None)
+        await save_tempbans_to_discord()
+
+@tasks.loop(seconds=30)
+async def check_tempmutes():
+    """Vérifie les tempmutes expirés et unmute automatiquement."""
+    now = time.time()
+    to_remove = []
+
+    for key, info in list(tempmute_data.items()):
+        if now >= info["end_time"]:
+            guild = bot.get_guild(info["guild_id"])
+            if guild:
+                member = guild.get_member(info["user_id"])
+                if not member:
+                    try:
+                        member = await guild.fetch_member(info["user_id"])
+                    except Exception:
+                        to_remove.append(key)
+                        continue
+
+                muted_role   = guild.get_role(MUTED_ROLE_ID)
+                verified_role = guild.get_role(ROLE_VERIFIED_ID)
+
+                try:
+                    if muted_role and muted_role in member.roles:
+                        await member.remove_roles(muted_role, reason="TempMute expiré — unmute automatique")
+                    if verified_role and verified_role not in member.roles:
+                        await member.add_roles(verified_role, reason="TempMute expiré — unmute automatique")
+
+                    log_chan = bot.get_channel(TEMPMUTE_LOG_CHANNEL_ID)
+                    if log_chan:
+                        from datetime import datetime, timezone
+                        embed = discord.Embed(
+                            title="⏱️ TempMute expiré — Unmute automatique",
+                            color=discord.Color.green()
+                        )
+                        embed.add_field(
+                            name="Utilisateur",
+                            value=f"{member.mention} (`{member.id}`)",
+                            inline=True
+                        )
+                        embed.add_field(
+                            name="Raison initiale",
+                            value=info.get("reason", "—"),
+                            inline=True
+                        )
+                        embed.add_field(
+                            name="Muté par",
+                            value=f"<@{info.get('moderator_id', 0)}>",
+                            inline=True
+                        )
+                        embed.set_footer(
+                            text=f"Unmute automatique — {datetime.now(timezone.utc).strftime('%d/%m/%Y à %H:%M')} UTC"
+                        )
+                        await log_chan.send(embed=embed)
+                except Exception:
+                    pass
+            to_remove.append(key)
+
+    if to_remove:
+        for key in to_remove:
+            tempmute_data.pop(key, None)
+        await save_tempmutes_to_discord()
+
 @tasks.loop(minutes=20)
 async def enforce_permissions():
     for guild in bot.guilds:
@@ -1171,14 +1375,12 @@ async def enforce_permissions():
 
         for channel in guild.channels:
 
-            # --- Unverified : exception SAUF le salon roblox-verify ---
             if unverified_role:
                 is_unverified_exception = (
                     channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL
                     or channel.id == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                     or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                 )
-                # Bloque explicitement le salon roblox-verify pour unverified
                 if channel.id == ROBLOX_VERIFY_CHANNEL_ID:
                     target_ow = channel.overwrites_for(unverified_role)
                     if target_ow.read_messages is not False:
@@ -1216,7 +1418,6 @@ async def enforce_permissions():
                         except:
                             pass
 
-            # --- Raider : tout bloqué ---
             if raider_role:
                 target_ow = channel.overwrites_for(raider_role)
                 if target_ow.read_messages is not False:
@@ -1230,7 +1431,6 @@ async def enforce_permissions():
                     except:
                         pass
 
-            # --- Muted : pas d'envoi ---
             if muted_role:
                 target_ow = channel.overwrites_for(muted_role)
                 if target_ow.send_messages is not False:
@@ -1243,10 +1443,8 @@ async def enforce_permissions():
                     except:
                         pass
 
-            # --- Roblox lié : uniquement roblox-verify, bloqué partout ailleurs ---
             if roblox_linked_role:
                 is_verify_channel = (channel.id == ROBLOX_VERIFY_CHANNEL_ID)
-                # Le salon de vérification Roblox est vérifié EN PREMIER
                 if is_verify_channel:
                     target_ow = channel.overwrites_for(roblox_linked_role)
                     if target_ow.read_messages is not True:
@@ -1428,6 +1626,8 @@ async def on_ready():
     await load_donations_from_discord()
     await refresh_scoreboard()
     await load_roblox_links()
+    await load_tempbans_from_discord()
+    await load_tempmutes_from_discord()
 
     if not check_giveaways.is_running():
         check_giveaways.start()
@@ -1437,6 +1637,10 @@ async def on_ready():
         enforce_permissions.start()
     if not update_roblox_funds.is_running():
         update_roblox_funds.start()
+    if not check_tempbans.is_running():
+        check_tempbans.start()
+    if not check_tempmutes.is_running():
+        check_tempmutes.start()
 
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
@@ -1446,7 +1650,6 @@ async def on_message(message):
     if message.author == bot.user or not message.guild:
         return
 
-    # --- Détection anti-raid @everyone ---
     has_everyone = message.mention_everyone or "@everyone" in message.content or "@here" in message.content
     if has_everyone and message.author.id != OWNER_ID and message.author.id not in safe_users:
         member = message.author
@@ -1459,11 +1662,9 @@ async def on_message(message):
         if uid not in everyone_tracker[gid]:
             everyone_tracker[gid][uid] = []
 
-        # Nettoie les anciens timestamps hors fenêtre
         everyone_tracker[gid][uid] = [t for t in everyone_tracker[gid][uid] if now - t < RAID_WINDOW]
         everyone_tracker[gid][uid].append(now)
 
-        # Supprime le message @everyone
         try:
             await message.delete()
         except:
@@ -1608,9 +1809,13 @@ async def help(ctx):
         embed.add_field(name="🔨 Modération", value=(
             f"**{COMMAND_PREFIX}msgdel [nb] (@user)** : Supprime des messages.\n"
             f"**{COMMAND_PREFIX}ban @user [min] [raison]** : Bannit (0 = permanent).\n"
+            f"**{COMMAND_PREFIX}tempban @user [durée] [raison]** : Ban temporaire.\n"
+            f"  └ Durée : `10m` = 10 min · `2h` = 2 heures · `7d` = 7 jours\n"
             f"**{COMMAND_PREFIX}pardon @user** : Débannit.\n"
             f"**{COMMAND_PREFIX}kick @user [raison]** : Expulse.\n"
-            f"**{COMMAND_PREFIX}mute @user [raison]** : Mute.\n"
+            f"**{COMMAND_PREFIX}mute @user [raison]** : Mute permanent.\n"
+            f"**{COMMAND_PREFIX}tempmute @user [durée] [raison]** : Mute temporaire.\n"
+            f"  └ Durée : `10m` = 10 min · `2h` = 2 heures · `7d` = 7 jours\n"
             f"**{COMMAND_PREFIX}unmute @user** : Unmute."
         ), inline=False)
 
@@ -1649,7 +1854,6 @@ async def help(ctx):
 
 @bot.command()
 async def setuprobloxverify(ctx):
-    """Envoie le message de vérification Roblox dans le salon dédié. Owner uniquement."""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
@@ -1813,6 +2017,59 @@ async def ban(ctx, user: discord.Member, duration: int, *, reason: str = "Aucune
 
 @bot.command()
 @commands.has_permissions(ban_members=True)
+async def tempban(ctx, user: discord.Member, duration: str, *, reason: str = "Aucune raison fournie"):
+    """
+    Ban temporaire.
+    Durée : 10m (minutes) · 2h (heures) · 7d (jours)
+    Exemple : <aav>tempban @user 2h Spam
+    """
+    seconds = parse_duration(duration)
+    if seconds is None:
+        return await ctx.send(
+            f"❌ Format de durée invalide.\n"
+            f"Utilise : `{COMMAND_PREFIX}tempban @user <durée> [raison]`\n"
+            f"Exemples : `10m` · `2h` · `7d`"
+        )
+
+    duration_str = format_duration(seconds)
+    end_time     = time.time() + seconds
+
+    try:
+        await user.ban(reason=f"[TempBan {duration_str}] {reason}")
+    except Exception as e:
+        return await ctx.send(f"❌ Erreur lors du ban : {e}")
+
+    key = f"{ctx.guild.id}:{user.id}"
+    tempban_data[key] = {
+        "user_id":      user.id,
+        "guild_id":     ctx.guild.id,
+        "end_time":     end_time,
+        "reason":       reason,
+        "moderator_id": ctx.author.id,
+        "username":     str(user)
+    }
+    await save_tempbans_to_discord()
+
+    log_chan = bot.get_channel(TEMPBAN_LOG_CHANNEL_ID)
+    if log_chan:
+        from datetime import datetime, timezone
+        expire_str = datetime.fromtimestamp(end_time, tz=timezone.utc).strftime("%d/%m/%Y à %H:%M UTC")
+        embed = discord.Embed(title="🔨 TempBan", color=discord.Color.red())
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="👤 Utilisateur",  value=f"{user} (`{user.id}`)",  inline=True)
+        embed.add_field(name="⏱️ Durée",        value=f"**{duration_str}**",    inline=True)
+        embed.add_field(name="📅 Expire le",    value=expire_str,               inline=True)
+        embed.add_field(name="👮 Modérateur",   value=ctx.author.mention,       inline=True)
+        embed.add_field(name="📝 Raison",       value=reason,                   inline=False)
+        await log_chan.send(embed=embed)
+
+    await ctx.send(
+        f"🔨 **{user}** a été banni temporairement pour **{duration_str}**.\n"
+        f"📝 Raison : {reason}"
+    )
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
 async def pardon(ctx, user: discord.User):
     try:
         await ctx.guild.unban(user, reason=f"Pardonné par {ctx.author}")
@@ -1824,6 +2081,12 @@ async def pardon(ctx, user: discord.User):
     if key in bans:
         del bans[key]
         save_bans(bans)
+
+    # Retire aussi du tempban si présent
+    tkey = f"{ctx.guild.id}:{user.id}"
+    if tkey in tempban_data:
+        del tempban_data[tkey]
+        await save_tempbans_to_discord()
 
     log_chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
     if log_chan:
@@ -1874,6 +2137,67 @@ async def mute(ctx, user: discord.Member, *, reason: str = "Aucune raison fourni
 
 @bot.command()
 @commands.has_permissions(manage_roles=True)
+async def tempmute(ctx, user: discord.Member, duration: str, *, reason: str = "Aucune raison fournie"):
+    """
+    Mute temporaire.
+    Durée : 10m (minutes) · 2h (heures) · 7d (jours)
+    Exemple : <aav>tempmute @user 30m Spam vocal
+    """
+    seconds = parse_duration(duration)
+    if seconds is None:
+        return await ctx.send(
+            f"❌ Format de durée invalide.\n"
+            f"Utilise : `{COMMAND_PREFIX}tempmute @user <durée> [raison]`\n"
+            f"Exemples : `10m` · `2h` · `7d`"
+        )
+
+    muted_role   = ctx.guild.get_role(MUTED_ROLE_ID)
+    verified_role = ctx.guild.get_role(ROLE_VERIFIED_ID)
+
+    if not muted_role:
+        return await ctx.send("❌ Rôle Muted introuvable.")
+
+    duration_str = format_duration(seconds)
+    end_time     = time.time() + seconds
+
+    try:
+        await user.add_roles(muted_role, reason=f"[TempMute {duration_str}] {reason}")
+        if verified_role and verified_role in user.roles:
+            await user.remove_roles(verified_role, reason=f"[TempMute {duration_str}] {reason}")
+    except Exception as e:
+        return await ctx.send(f"❌ Erreur lors du mute : {e}")
+
+    key = f"{ctx.guild.id}:{user.id}"
+    tempmute_data[key] = {
+        "user_id":      user.id,
+        "guild_id":     ctx.guild.id,
+        "end_time":     end_time,
+        "reason":       reason,
+        "moderator_id": ctx.author.id,
+        "username":     str(user)
+    }
+    await save_tempmutes_to_discord()
+
+    log_chan = bot.get_channel(TEMPMUTE_LOG_CHANNEL_ID)
+    if log_chan:
+        from datetime import datetime, timezone
+        expire_str = datetime.fromtimestamp(end_time, tz=timezone.utc).strftime("%d/%m/%Y à %H:%M UTC")
+        embed = discord.Embed(title="🔇 TempMute", color=discord.Color.orange())
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="👤 Utilisateur",  value=f"{user.mention} (`{user.id}`)", inline=True)
+        embed.add_field(name="⏱️ Durée",        value=f"**{duration_str}**",           inline=True)
+        embed.add_field(name="📅 Expire le",    value=expire_str,                      inline=True)
+        embed.add_field(name="👮 Modérateur",   value=ctx.author.mention,              inline=True)
+        embed.add_field(name="📝 Raison",       value=reason,                          inline=False)
+        await log_chan.send(embed=embed)
+
+    await ctx.send(
+        f"🔇 **{user}** a été muté temporairement pour **{duration_str}**.\n"
+        f"📝 Raison : {reason}"
+    )
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
 async def unmute(ctx, user: discord.Member):
     muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
     membre_role = ctx.guild.get_role(ROLE_VERIFIED_ID)
@@ -1888,6 +2212,12 @@ async def unmute(ctx, user: discord.Member):
             await user.add_roles(membre_role, reason=f"Unmute par {ctx.author}")
     except Exception as e:
         return await ctx.send(f"❌ Erreur : {e}")
+
+    # Retire aussi du tempmute si présent
+    key = f"{ctx.guild.id}:{user.id}"
+    if key in tempmute_data:
+        del tempmute_data[key]
+        await save_tempmutes_to_discord()
 
     await ctx.send(f"🔊 {user.mention} unmute.")
 
@@ -2105,23 +2435,20 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
         await ctx.send(f"📋 **{user.display_name}** — {label} : `{val}`")
 
 # ==========================================
-# COMMANDE SCOREBOARD DONATIONS
+# COMMANDES ROBLOX & DONATIONS
 # ==========================================
 
 @bot.command()
 async def robloxprofile(ctx, *, user_input: str = None):
-    """Affiche le profil Roblox lié d'un membre. Optionnel : @mention ou pseudo Discord."""
     target_member = None
 
     if user_input is None:
         target_member = ctx.author
     else:
-        # Essaie de convertir en Member (mention ou ID)
         try:
             converter = commands.MemberConverter()
             target_member = await converter.convert(ctx, user_input)
         except:
-            # Cherche par nom d'affichage ou username
             user_lower = user_input.lower()
             for m in ctx.guild.members:
                 if m.display_name.lower() == user_lower or m.name.lower() == user_lower:
@@ -2143,9 +2470,6 @@ async def robloxprofile(ctx, *, user_input: str = None):
     roblox_id       = link_data.get("roblox_id", "?")
     linked_at       = link_data.get("linked_at", "Inconnu")
 
-    # Récupère l'avatar Roblox
-    avatar_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={roblox_id}&size=150x150&format=Png"
-
     embed = discord.Embed(
         title=f"🎮 Profil Roblox — {roblox_username}",
         color=discord.Color.blurple()
@@ -2165,20 +2489,17 @@ async def robloxprofile(ctx, *, user_input: str = None):
 
 @bot.command()
 async def RobuxLeaderBoard(ctx):
-    """Affiche le topboard complet des donations dans le salon courant."""
     embed = build_scoreboard_embed()
     await ctx.send(embed=embed)
 
 @bot.command()
 async def RemoveTopBoardRobux(ctx, username: str, amount: int):
-    """Retire un montant de Robux du total d'un donateur Roblox (Owner uniquement)."""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Commande réservée au propriétaire.")
 
     if amount <= 0:
         return await ctx.send("❌ Le montant doit être supérieur à 0.")
 
-    # Cherche le donateur par pseudo Roblox (insensible à la casse)
     target_uid = None
     for uid, entry in donations_data.items():
         if entry.get("username", "").lower() == username.lower():
@@ -2195,10 +2516,7 @@ async def RemoveTopBoardRobux(ctx, username: str, amount: int):
     await save_donations_to_discord()
     await refresh_scoreboard()
 
-    embed = discord.Embed(
-        title="✂️ Robux retirés du Topboard",
-        color=discord.Color.orange()
-    )
+    embed = discord.Embed(title="✂️ Robux retirés du Topboard", color=discord.Color.orange())
     embed.add_field(name="Joueur Roblox", value=f"**{username}**", inline=True)
     embed.add_field(name="Retiré", value=f"**{amount:,}** Robux".replace(",", " "), inline=True)
     embed.add_field(name="​", value="​", inline=True)
@@ -2209,11 +2527,7 @@ async def RemoveTopBoardRobux(ctx, username: str, amount: int):
 
 @bot.command()
 async def RobuxDonatedProfile(ctx, *, user_input: str = None):
-    """Affiche le profil de donation. Sans argument = soi-même, sinon @mention ou pseudo Roblox."""
-
-    # Détermine la cible
     if user_input is None:
-        # Cherche par l'auteur de la commande dans donations_data
         uid = None
         for donor_uid, entry in donations_data.items():
             if entry.get("username", "").lower() == ctx.author.display_name.lower() or entry.get("username", "").lower() == ctx.author.name.lower():
@@ -2222,14 +2536,12 @@ async def RobuxDonatedProfile(ctx, *, user_input: str = None):
         display_name = ctx.author.display_name
         avatar_url = ctx.author.display_avatar.url
     else:
-        # Essaie mention/ID Discord
         uid = None
         avatar_url = None
         display_name = user_input
         try:
             converter = commands.MemberConverter()
             member = await converter.convert(ctx, user_input)
-            # Cherche par nom Discord dans donations_data
             for donor_uid, entry in donations_data.items():
                 if entry.get("username", "").lower() == member.display_name.lower() or entry.get("username", "").lower() == member.name.lower():
                     uid = donor_uid
@@ -2237,7 +2549,6 @@ async def RobuxDonatedProfile(ctx, *, user_input: str = None):
             display_name = member.display_name
             avatar_url = member.display_avatar.url
         except:
-            # Cherche directement par pseudo Roblox dans donations_data
             for donor_uid, entry in donations_data.items():
                 if entry.get("username", "").lower() == user_input.lower():
                     uid = donor_uid
@@ -2245,21 +2556,15 @@ async def RobuxDonatedProfile(ctx, *, user_input: str = None):
                     break
 
     if not uid or uid not in donations_data:
-        return  # Aucun message si pas dans le topboard
+        return
 
     entry = donations_data[uid]
     total = entry.get("total", 0)
     roblox_username = entry.get("username", display_name)
 
-    # Calcul du rang
-    sorted_donors = sorted(
-        donations_data.items(),
-        key=lambda x: x[1].get("total", 0),
-        reverse=True
-    )
+    sorted_donors = sorted(donations_data.items(), key=lambda x: x[1].get("total", 0), reverse=True)
     rank = next((i + 1 for i, (u, _) in enumerate(sorted_donors) if u == uid), "?")
 
-    # Médaille selon le rang
     if rank == 1:
         medal = "🥇"
     elif rank == 2:
@@ -2271,31 +2576,18 @@ async def RobuxDonatedProfile(ctx, *, user_input: str = None):
     else:
         medal = "💸"
 
-    # Pourcentage du total général
     grand_total = sum(e.get("total", 0) for e in donations_data.values())
     percentage = round((total / grand_total) * 100, 1) if grand_total > 0 else 0
 
-    # Barre de contribution
     bar_length = 20
     filled = int(bar_length * percentage / 100)
     bar = "█" * filled + "░" * (bar_length - filled)
 
-    embed = discord.Embed(
-        title=f"{medal} Profil Donation — {roblox_username}",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title=f"{medal} Profil Donation — {roblox_username}", color=discord.Color.gold())
     if avatar_url:
         embed.set_thumbnail(url=avatar_url)
-    embed.add_field(
-        name="💰 Total donné",
-        value=f"**{total:,}** Robux".replace(",", " "),
-        inline=True
-    )
-    embed.add_field(
-        name="🏆 Rang",
-        value=f"**#{rank}** sur {len(donations_data)}",
-        inline=True
-    )
+    embed.add_field(name="💰 Total donné",   value=f"**{total:,}** Robux".replace(",", " "), inline=True)
+    embed.add_field(name="🏆 Rang",          value=f"**#{rank}** sur {len(donations_data)}",  inline=True)
     embed.add_field(
         name="📊 Contribution",
         value=f"`{bar}` **{percentage}%**\ndu total des donations",
@@ -2458,14 +2750,11 @@ async def rank(ctx, member: discord.Member = None):
     sorted_users = sorted(xp_data.items(), key=lambda x: x[1].get("xp", 0), reverse=True)
     rank_pos = next((i + 1 for i, (uid2, _) in enumerate(sorted_users) if uid2 == uid), "?")
 
-    embed = discord.Embed(
-        title=f"📊 Niveau de {target.display_name}",
-        color=discord.Color.blurple()
-    )
+    embed = discord.Embed(title=f"📊 Niveau de {target.display_name}", color=discord.Color.blurple())
     embed.set_thumbnail(url=target.display_avatar.url)
-    embed.add_field(name="Niveau", value=f"**{level}**", inline=True)
+    embed.add_field(name="Niveau",   value=f"**{level}**", inline=True)
     embed.add_field(name="XP Total", value=f"**{total_xp:,}**".replace(",", " "), inline=True)
-    embed.add_field(name="Rang", value=f"**#{rank_pos}**", inline=True)
+    embed.add_field(name="Rang",     value=f"**#{rank_pos}**", inline=True)
     embed.add_field(
         name=f"Progression vers le niveau {level + 1}",
         value=f"`{bar}` {xp_in_level}/{xp_needed} XP",
@@ -2536,9 +2825,9 @@ async def daily(ctx):
     await check_level_up(ctx.guild, ctx.author, old_level, entry["level"])
 
     embed = discord.Embed(title="🎁 Récompense quotidienne", color=discord.Color.green())
-    embed.add_field(name="XP gagné", value=f"+**{bonus_xp}** XP", inline=True)
+    embed.add_field(name="XP gagné",  value=f"+**{bonus_xp}** XP", inline=True)
     embed.add_field(name="🔥 Streak", value=f"**{streak}** jour(s)", inline=True)
-    embed.add_field(name="XP Total", value=f"**{entry['xp']:,}**".replace(",", " "), inline=True)
+    embed.add_field(name="XP Total",  value=f"**{entry['xp']:,}**".replace(",", " "), inline=True)
     if streak >= 7:
         embed.set_footer(text=f"🔥 Incroyable ! {streak} jours consécutifs !")
     await ctx.send(embed=embed)
@@ -2554,12 +2843,9 @@ async def streak(ctx, member: discord.Member = None):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     claimed_today = last == today
 
-    embed = discord.Embed(
-        title=f"🔥 Streak de {target.display_name}",
-        color=discord.Color.orange()
-    )
+    embed = discord.Embed(title=f"🔥 Streak de {target.display_name}", color=discord.Color.orange())
     embed.add_field(name="Jours consécutifs", value=f"**{s}** jour(s)", inline=True)
-    embed.add_field(name="Dernier daily", value=last, inline=True)
+    embed.add_field(name="Dernier daily",     value=last,                inline=True)
     embed.add_field(
         name="Aujourd'hui",
         value="✅ Réclamé" if claimed_today else "❌ Pas encore réclamé",
@@ -2643,7 +2929,7 @@ async def slots(ctx):
 
     embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.gold())
     embed.description = f"# {s1} {s2} {s3}\n{result}"
-    embed.set_footer(text=f"Prochain tour dans 10 minutes")
+    embed.set_footer(text="Prochain tour dans 10 minutes")
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -2853,11 +3139,11 @@ class PenduView(discord.ui.View):
             discord.Color.red() if self.errors >= self.max_errors else discord.Color.blurple()
         )
         embed = discord.Embed(title="🪢 Pendu", color=color)
-        embed.add_field(name="Pendu", value=PENDU_STAGES[self.errors], inline=False)
-        embed.add_field(name="Mot", value=f"`{self.display_word()}`", inline=False)
+        embed.add_field(name="Pendu",            value=PENDU_STAGES[self.errors], inline=False)
+        embed.add_field(name="Mot",              value=f"`{self.display_word()}`", inline=False)
         guessed_str = " ".join(sorted(self.guessed)) if self.guessed else "—"
-        embed.add_field(name="Lettres essayées", value=guessed_str, inline=True)
-        embed.add_field(name="Erreurs", value=f"{self.errors}/{self.max_errors}", inline=True)
+        embed.add_field(name="Lettres essayées", value=guessed_str,               inline=True)
+        embed.add_field(name="Erreurs",          value=f"{self.errors}/{self.max_errors}", inline=True)
         return embed
 
 @bot.command()
