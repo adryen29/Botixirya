@@ -35,6 +35,11 @@ BANS_FILE = "bans.json"
 TEMPBAN_LOG_CHANNEL_ID  = 1510401125616980169    # Logs + mémoire tempbans
 TEMPMUTE_LOG_CHANNEL_ID = 1510400362526543934    # Logs + mémoire tempmutes
 
+MEMBER_LOG_CHANNEL_ID        = 1510621031960805396   # Arrivées & départs
+MESSAGES_LOG_CHANNEL_ID      = 1510620947621613599   # Messages supprimés & modifiés
+ADMIN_ACTIONS_LOG_CHANNEL_ID = 1510620898363707533   # Commandes admin/modo utilisées
+VERIF_HISTORY_LOG_CHANNEL_ID = 1510620834547367936   # Historique vérifications Roblox
+
 OWNER_ID = 1339332485930160189                   # ID du propriétaire
 MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
 BACKUP_SERVER_ID = 1481205788566618115           # Serveur de backup
@@ -120,6 +125,16 @@ roblox_links  = {}       # {discord_user_id: {"roblox_id": str, "roblox_username
 # --- TempBan / TempMute ---
 tempban_data  = {}       # {"guild_id:user_id": {user_id, guild_id, end_time, reason, moderator_id, username}}
 tempmute_data = {}       # même structure
+
+# --- Commandes admin/modo à tracer automatiquement ---
+LOGGED_ADMIN_COMMANDS = {
+    'kill', 'setcountchannel', 'setscore', 'lock', 'unlock', 'restore',
+    'giveaway', 'msgdel', 'ban', 'tempban', 'pardon', 'kick', 'mute',
+    'tempmute', 'unmute', 'safe', 'removesafe', 'TicketCreatingChannel',
+    'SetTableChannel', 'AddTableLine', 'SetTableValue', 'RemoveTableValue',
+    'GetTableUserValue', 'RemoveTopBoardRobux', 'backup', 'COMMANDSON',
+    'setuprobloxverify'
+}
 # ==========================================
 
 # ==========================================
@@ -321,6 +336,26 @@ async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_userna
             "linked_at":       discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M")
         }
         await save_roblox_links()
+
+        # Log dans verif-history
+        verif_chan = bot.get_channel(VERIF_HISTORY_LOG_CHANNEL_ID)
+        if verif_chan:
+            embed = discord.Embed(
+                title="🎮 Compte Roblox lié — Vérification complète",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="Discord",        value=f"{member.mention} (`{discord_user_id}`)", inline=True)
+            embed.add_field(name="Pseudo Discord", value=str(member),                               inline=True)
+            embed.add_field(name="Roblox",         value=f"**{roblox_username}**",                  inline=True)
+            embed.add_field(name="Roblox ID",      value=f"`{roblox_id}`",                          inline=True)
+            embed.add_field(
+                name="Profil Roblox",
+                value=f"[Voir sur Roblox](https://www.roblox.com/users/{roblox_id}/profile)",
+                inline=True
+            )
+            await verif_chan.send(embed=embed)
 
         try:
             await member.send(
@@ -984,6 +1019,19 @@ class VerifyView(discord.ui.View):
                 await interaction.user.remove_roles(unverified_role, reason="Règlement accepté")
         except Exception as e:
             return await interaction.response.send_message(f"❌ Erreur : {e}", ephemeral=True)
+
+        # Log dans verif-history
+        verif_chan = bot.get_channel(VERIF_HISTORY_LOG_CHANNEL_ID)
+        if verif_chan:
+            embed = discord.Embed(
+                title="📋 Règlement accepté",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            embed.add_field(name="Utilisateur", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+            embed.add_field(name="Pseudo",      value=str(interaction.user),                                   inline=True)
+            await verif_chan.send(embed=embed)
 
         await interaction.response.send_message(
             "✅ Règlement accepté ! Rends-toi maintenant dans le salon de vérification pour lier ton compte Roblox.",
@@ -1726,6 +1774,22 @@ async def on_member_join(member):
         except Exception as e:
             await send_log(f"⚠️ Impossible d'attribuer Unverified à {member.mention} : {e}")
 
+    log_chan = bot.get_channel(MEMBER_LOG_CHANNEL_ID)
+    if log_chan:
+        account_age = (discord.utils.utcnow() - member.created_at).days
+        age_flag = " — ⚠️ **COMPTE RÉCENT**" if account_age < 7 else ""
+        embed = discord.Embed(
+            title="📥 Nouveau membre",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Utilisateur",    value=f"{member.mention} (`{member.id}`)",                  inline=False)
+        embed.add_field(name="Compte créé le", value=member.created_at.strftime("%d/%m/%Y à %H:%M UTC"),   inline=True)
+        embed.add_field(name="Âge du compte",  value=f"{account_age} jour(s){age_flag}",                  inline=True)
+        embed.set_footer(text=f"Membres : {member.guild.member_count}")
+        await log_chan.send(embed=embed)
+
 @bot.event
 async def on_guild_channel_delete(channel):
     guild = channel.guild
@@ -1749,6 +1813,142 @@ async def on_guild_role_delete(role):
             break
     except:
         pass
+
+@bot.event
+async def on_member_remove(member):
+    if member.bot:
+        return
+    log_chan = bot.get_channel(MEMBER_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+
+    time_on_server = "Inconnu"
+    if member.joined_at:
+        delta = discord.utils.utcnow() - member.joined_at
+        days  = delta.days
+        hours = delta.seconds // 3600
+        time_on_server = f"{days}j {hours}h" if days else f"{hours}h"
+
+    roles = [r.name for r in member.roles if r != member.guild.default_role]
+    roles_str = ", ".join(roles[:15]) if roles else "Aucun"
+
+    embed = discord.Embed(
+        title="📤 Membre parti",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Utilisateur",         value=f"{member} (`{member.id}`)", inline=False)
+    embed.add_field(name="Temps sur le serveur", value=time_on_server,             inline=True)
+    embed.add_field(name="Rôles",               value=roles_str,                   inline=False)
+    embed.set_footer(text=f"Membres : {member.guild.member_count}")
+    await log_chan.send(embed=embed)
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot or not message.guild:
+        return
+    # Ne pas logger les messages dans les salons mémoire du bot
+    memory_channels = {
+        DB_CHANNEL_ID, XP_MEMORY_CHANNEL_ID, DONATION_MEMORY_CHANNEL_ID,
+        TICKET_MEMORY_CHANNEL_ID, TABLE_LOG_CHANNEL_ID, ROBLOX_LINKS_CHANNEL_ID,
+        ROLE_BACKUP_CHANNEL_ID, TEMPBAN_LOG_CHANNEL_ID, TEMPMUTE_LOG_CHANNEL_ID,
+        MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
+        ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
+    }
+    if message.channel.id in memory_channels:
+        return
+
+    log_chan = bot.get_channel(MESSAGES_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+
+    content = message.content or "*(contenu non disponible — embed ou fichier)*"
+    if len(content) > 1000:
+        content = content[:1000] + "…"
+
+    embed = discord.Embed(
+        title="🗑️ Message supprimé",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Auteur",  value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
+    embed.add_field(name="Salon",   value=message.channel.mention,                             inline=True)
+    embed.add_field(name="Contenu", value=content,                                             inline=False)
+    if message.attachments:
+        embed.add_field(
+            name="Pièces jointes",
+            value="\n".join(a.filename for a in message.attachments),
+            inline=False
+        )
+    await log_chan.send(embed=embed)
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or not before.guild:
+        return
+    if before.content == after.content:
+        return  # Changement d'embed uniquement, pas de contenu
+
+    memory_channels = {
+        DB_CHANNEL_ID, XP_MEMORY_CHANNEL_ID, DONATION_MEMORY_CHANNEL_ID,
+        TICKET_MEMORY_CHANNEL_ID, TABLE_LOG_CHANNEL_ID, ROBLOX_LINKS_CHANNEL_ID,
+        MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
+        ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
+    }
+    if before.channel.id in memory_channels:
+        return
+
+    log_chan = bot.get_channel(MESSAGES_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+
+    before_content = before.content or "*(non disponible)*"
+    after_content  = after.content  or "*(non disponible)*"
+    if len(before_content) > 500:
+        before_content = before_content[:500] + "…"
+    if len(after_content) > 500:
+        after_content = after_content[:500] + "…"
+
+    embed = discord.Embed(
+        title="✏️ Message modifié",
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Auteur", value=f"{before.author.mention} (`{before.author.id}`)", inline=True)
+    embed.add_field(name="Salon",  value=before.channel.mention,                            inline=True)
+    embed.add_field(name="Lien",   value=f"[Aller au message]({after.jump_url})",           inline=True)
+    embed.add_field(name="Avant",  value=before_content, inline=False)
+    embed.add_field(name="Après",  value=after_content,  inline=False)
+    await log_chan.send(embed=embed)
+
+@bot.after_invoke
+async def log_admin_action(ctx):
+    """Trace automatiquement toutes les commandes admin/modo dans admin-actions-logs."""
+    if not ctx.command or ctx.command.name not in LOGGED_ADMIN_COMMANDS:
+        return
+    if not ctx.guild:
+        return
+
+    log_chan = bot.get_channel(ADMIN_ACTIONS_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+
+    full_msg = ctx.message.content
+    if len(full_msg) > 800:
+        full_msg = full_msg[:800] + "…"
+
+    embed = discord.Embed(
+        title="🛠️ Commande admin utilisée",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Commande",   value=f"`{ctx.prefix}{ctx.command.name}`",              inline=True)
+    embed.add_field(name="Utilisateur", value=f"{ctx.author.mention} (`{ctx.author.id}`)",    inline=True)
+    embed.add_field(name="Salon",       value=ctx.channel.mention,                            inline=True)
+    embed.add_field(name="Message complet", value=f"```{full_msg}```",                        inline=False)
+    embed.set_footer(text=f"Serveur : {ctx.guild.name}")
+    await log_chan.send(embed=embed)
 
 # ==========================================
 # COMMANDES
