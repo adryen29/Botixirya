@@ -25,6 +25,8 @@ VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
 ROLE_VERIFIED_ID = 1477170552950231164
 GIVEAWAY_FILE = "giveaways.json"
+MANUAL_LOG_CHANNEL_ID = 1510623278379565288   # Logs actions manuelles Discord
+
 
 BAN_LOG_CHANNEL_ID = 1481201790375563498         # Logs bans
 KICK_LOG_CHANNEL_ID = 1481202403574284310        # Logs kicks
@@ -214,6 +216,17 @@ def receive_donation():
 
     return {"success": True, "total": donations_data[user_id]["total"]}, 200
 
+
+async def notify_oauth_expired(user_id: int):
+    try:
+        user = await bot.fetch_user(user_id)
+        await user.send(
+            "⏱️ **Vérification Roblox expirée**\n"
+            "Ta session a expiré (10 minutes dépassées).\n"
+            "Retourne sur le serveur et clique à nouveau sur le bouton pour recommencer."
+        )
+    except:
+        pass
 @app.route('/roblox/callback')
 def roblox_callback():
     import requests as req_lib
@@ -223,9 +236,16 @@ def roblox_callback():
     if not code or not state:
         return "<h2>❌ Paramètres manquants.</h2>", 400
 
-    discord_user_id = oauth_states.pop(state, None)
-    if not discord_user_id:
+    state_data = oauth_states.pop(state, None)
+    if not state_data:
         return "<h2>❌ Session expirée ou invalide. Recommence depuis Discord.</h2>", 400
+    if time.time() > state_data.get("expires_at", 0):
+        asyncio.run_coroutine_threadsafe(notify_oauth_expired(state_data["user_id"]), bot.loop)
+        return """<html><body style="font-family:sans-serif;text-align:center;padding:60px;background:#1a1a2e;color:white;">
+        <h1>⏱️ Session expirée</h1>
+        <p>Tu as mis plus de 10 minutes. Retourne sur Discord et recommence.</p>
+        </body></html>""", 400
+    discord_user_id = state_data["user_id"]
 
     try:
         token_resp = req_lib.post(
@@ -1058,7 +1078,10 @@ class RobloxVerifyView(discord.ui.View):
             )
 
         state = str(uuid.uuid4())
-        oauth_states[state] = interaction.user.id
+        oauth_states[state] = {
+            "user_id":    interaction.user.id,
+            "expires_at": time.time() + 600
+        }
 
         oauth_url = (
             f"https://apis.roblox.com/oauth/v1/authorize"
@@ -1269,10 +1292,33 @@ class CloseTicketView(discord.ui.View):
 async def check_giveaways():
     data = load_giveaway()
     now = time.time()
+    changed = False
     for msg_id, gw in list(data.items()):
         if not gw['ended'] and now >= gw['end_time']:
             gw['ended'] = True
-            save_giveaway(data)
+            changed = True
+            channel = bot.get_channel(gw['channel_id'])
+            if not channel:
+                continue
+            participants = gw.get('participants', [])
+            winners_count = gw.get('winners_count', 1)
+            if not participants:
+                try:
+                    await channel.send("🎉 Le giveaway est terminé mais **personne n'a participé** !")
+                except:
+                    pass
+                continue
+            winners = random.sample(participants, min(winners_count, len(participants)))
+            winners_mentions = ", ".join(f"<@{w}>" for w in winners)
+            try:
+                embed = discord.Embed(title="🎉 Giveaway terminé !", color=discord.Color.gold())
+                embed.add_field(name="Prix",       value=gw['prize'],       inline=True)
+                embed.add_field(name="Gagnant(s)", value=winners_mentions,  inline=False)
+                await channel.send(content=f"🎊 Félicitations {winners_mentions} !", embed=embed)
+            except:
+                pass
+    if changed:
+        save_giveaway(data)
 
 @tasks.loop(seconds=60)
 async def check_bans():
@@ -1412,6 +1458,14 @@ async def check_tempmutes():
         for key in to_remove:
             tempmute_data.pop(key, None)
         await save_tempmutes_to_discord()
+@tasks.loop(minutes=5)
+async def cleanup_oauth_states():
+    now = time.time()
+    expired = [s for s, d in list(oauth_states.items()) if now > d.get("expires_at", 0)]
+    for state in expired:
+        data = oauth_states.pop(state, None)
+        if data:
+            await notify_oauth_expired(data["user_id"])
 
 @tasks.loop(minutes=20)
 async def enforce_permissions():
@@ -1689,7 +1743,9 @@ async def on_ready():
         check_tempbans.start()
     if not check_tempmutes.is_running():
         check_tempmutes.start()
-
+    if not cleanup_oauth_states.is_running():
+        cleanup_oauth_states.start()
+        
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
 @bot.event
@@ -1764,9 +1820,12 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.event
+@bot.event
 async def on_member_join(member):
     if member.bot:
         return
+
+    await asyncio.sleep(0.5)
     unverified_role = member.guild.get_role(ROLE_UNVERIFIED_ID)
     if unverified_role:
         try:
@@ -1784,12 +1843,11 @@ async def on_member_join(member):
             timestamp=discord.utils.utcnow()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Utilisateur",    value=f"{member.mention} (`{member.id}`)",                  inline=False)
-        embed.add_field(name="Compte créé le", value=member.created_at.strftime("%d/%m/%Y à %H:%M UTC"),   inline=True)
-        embed.add_field(name="Âge du compte",  value=f"{account_age} jour(s){age_flag}",                  inline=True)
+        embed.add_field(name="Utilisateur",    value=f"{member.mention} (`{member.id}`)",                inline=False)
+        embed.add_field(name="Compte créé le", value=member.created_at.strftime("%d/%m/%Y à %H:%M UTC"), inline=True)
+        embed.add_field(name="Âge du compte",  value=f"{account_age} jour(s){age_flag}",                inline=True)
         embed.set_footer(text=f"Membres : {member.guild.member_count}")
         await log_chan.send(embed=embed)
-
 @bot.event
 async def on_guild_channel_delete(channel):
     guild = channel.guild
@@ -1801,7 +1859,6 @@ async def on_guild_channel_delete(channel):
             break
     except:
         pass
-
 @bot.event
 async def on_guild_role_delete(role):
     guild = role.guild
@@ -1818,6 +1875,22 @@ async def on_guild_role_delete(role):
 async def on_member_remove(member):
     if member.bot:
         return
+        await asyncio.sleep(0.5)
+    try:
+        async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+            if (time.time() - entry.created_at.timestamp() < 5
+                    and entry.target.id == member.id
+                    and entry.user.id != bot.user.id):
+                manual_log = bot.get_channel(MANUAL_LOG_CHANNEL_ID)
+                if manual_log:
+                    embed = discord.Embed(title="👢 Kick manuel", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+                    embed.add_field(name="Utilisateur", value=f"{member} (`{member.id}`)", inline=True)
+                    embed.add_field(name="Modérateur",  value=f"{entry.user.mention} (`{entry.user.id}`)", inline=True)
+                    embed.add_field(name="Raison",      value=entry.reason or "—", inline=False)
+                    await manual_log.send(embed=embed)
+            break
+    except Exception:
+        pass
     log_chan = bot.get_channel(MEMBER_LOG_CHANNEL_ID)
     if not log_chan:
         return
@@ -1921,7 +1994,82 @@ async def on_message_edit(before, after):
     embed.add_field(name="Avant",  value=before_content, inline=False)
     embed.add_field(name="Après",  value=after_content,  inline=False)
     await log_chan.send(embed=embed)
+@bot.event
+async def on_member_ban(guild, user):
+    await asyncio.sleep(0.5)
+    log_chan = bot.get_channel(MANUAL_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+        if time.time() - entry.created_at.timestamp() > 5:
+            return
+        if entry.user.id == bot.user.id:
+            return
+        embed = discord.Embed(title="🔨 Ban manuel", color=discord.Color.dark_red(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Utilisateur", value=f"{user} (`{user.id}`)", inline=True)
+        embed.add_field(name="Modérateur",  value=f"{entry.user.mention} (`{entry.user.id}`)", inline=True)
+        embed.add_field(name="Raison",      value=entry.reason or "—", inline=False)
+        await log_chan.send(embed=embed)
+        return
 
+@bot.event
+async def on_member_unban(guild, user):
+    await asyncio.sleep(0.5)
+    log_chan = bot.get_channel(MANUAL_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.unban):
+        if time.time() - entry.created_at.timestamp() > 5:
+            return
+        if entry.user.id == bot.user.id:
+            return
+        embed = discord.Embed(title="✅ Unban manuel", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Utilisateur", value=f"{user} (`{user.id}`)", inline=True)
+        embed.add_field(name="Modérateur",  value=f"{entry.user.mention} (`{entry.user.id}`)", inline=True)
+        await log_chan.send(embed=embed)
+        return
+
+@bot.event
+async def on_member_update(before, after):
+    muted_role   = after.guild.get_role(MUTED_ROLE_ID)
+    was_muted    = muted_role in before.roles if muted_role else False
+    is_muted_now = muted_role in after.roles  if muted_role else False
+    timeout_changed = before.timed_out_until != after.timed_out_until
+
+    if not (was_muted != is_muted_now or timeout_changed):
+        return
+
+    await asyncio.sleep(0.5)
+    log_chan = bot.get_channel(MANUAL_LOG_CHANNEL_ID)
+    if not log_chan:
+        return
+
+    if was_muted != is_muted_now:
+        async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_role_update):
+            if time.time() - entry.created_at.timestamp() > 5:
+                break
+            if entry.user.id == bot.user.id:
+                break
+            title = "🔇 Mute manuel" if is_muted_now else "🔊 Unmute manuel"
+            color = discord.Color.orange() if is_muted_now else discord.Color.teal()
+            embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
+            embed.add_field(name="Utilisateur", value=f"{after.mention} (`{after.id}`)", inline=True)
+            embed.add_field(name="Modérateur",  value=f"{entry.user.mention} (`{entry.user.id}`)", inline=True)
+            await log_chan.send(embed=embed)
+            break
+
+    if timeout_changed and after.timed_out_until:
+        async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_update):
+            if time.time() - entry.created_at.timestamp() > 5:
+                break
+            if entry.user.id == bot.user.id:
+                break
+            embed = discord.Embed(title="⏱️ Timeout manuel", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="Utilisateur", value=f"{after.mention} (`{after.id}`)", inline=True)
+            embed.add_field(name="Modérateur",  value=f"{entry.user.mention} (`{entry.user.id}`)", inline=True)
+            embed.add_field(name="Expire le",   value=after.timed_out_until.strftime("%d/%m/%Y à %H:%M UTC"), inline=True)
+            await log_chan.send(embed=embed)
+            break
 @bot.after_invoke
 async def log_admin_action(ctx):
     """Trace automatiquement toutes les commandes admin/modo dans admin-actions-logs."""
@@ -1999,7 +2147,8 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}RobuxDonatedProfile @user** : Profil de donation d'un membre (si dans le topboard)."
     ), inline=False)
 
-    if not is_membre or is_owner:
+    is_admin = ctx.author.guild_permissions.administrator or is_owner
+    if is_admin:
         embed.add_field(name="⚙️ Admin", value=(
             f"**{COMMAND_PREFIX}setcountchannel** : Définit le salon de comptage.\n"
             f"**{COMMAND_PREFIX}setscore [nb]** : Modifie manuellement le score.\n"
@@ -3464,20 +3613,35 @@ async def backup(ctx):
                 await ctx.send(f"⚠️ Catégorie `{category.name}` ignorée : {e}")
 
     await status_msg.edit(content="🔄 Copie des salons en cours...")
+
+    def convert_overwrites(source_overwrites: dict) -> dict:
+        result = {}
+        for target, perms in source_overwrites.items():
+            if isinstance(target, discord.Role):
+                new_target = backup_guild.default_role if target.is_default() else role_map.get(target.id)
+            else:
+                new_target = None
+            if new_target:
+                result[new_target] = perms
+        return result
+
     for channel in main_guild.channels:
         if isinstance(channel, discord.CategoryChannel):
             continue
         if channel.name in existing_channels:
             continue
         cat = category_map.get(channel.category_id) if channel.category_id else None
+        overwrites = convert_overwrites(channel.overwrites)
         try:
             if isinstance(channel, discord.TextChannel):
                 await backup_guild.create_text_channel(
-                    name=channel.name, category=cat, topic=channel.topic or "", reason="Botixirya Backup"
+                    name=channel.name, category=cat, topic=channel.topic or "",
+                    overwrites=overwrites, reason="Botixirya Backup"
                 )
             elif isinstance(channel, discord.VoiceChannel):
                 await backup_guild.create_voice_channel(
-                    name=channel.name, category=cat, reason="Botixirya Backup"
+                    name=channel.name, category=cat,
+                    overwrites=overwrites, reason="Botixirya Backup"
                 )
             await asyncio.sleep(0.4)
         except Exception as e:
