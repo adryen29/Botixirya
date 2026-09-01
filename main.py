@@ -44,6 +44,15 @@ VERIF_HISTORY_LOG_CHANNEL_ID = 1510620834547367936   # Historique vérifications
 
 ONLINE_COUNTER_CHANNEL_ID = 1477628409826906183  # Salon vocal affichant le nombre de membres en ligne
 
+# --- Système d'invitations ---
+INVITE_ARRIVAL_CHANNEL_ID = 1477457433184960719   # Annonce "X a invité Y" à chaque arrivée
+INVITE_DEPART_CHANNEL_ID = 1505846628546773143     # Annonce des départs (avec rappel de l'inviteur si connu)
+INVITE_CASHOUT_CHANNEL_ID = 1544422573914198046    # Demandes de cashout + confirmation de paiement (logs permanents)
+INVITE_DATA_CHANNEL_ID = 1544421684201652314       # Mémoire principale (soldes, compteurs, historique cashouts)
+ALREADY_INVITED_CHANNEL_ID = 1544426137164455967   # Liste permanente des ID déjà invités une fois (anti-farming)
+INVITE_REWARD_PER_INVITE = 10   # Robux crédités par invitation valide
+INVITE_CASHOUT_MINIMUM = 50     # Solde minimum requis pour pouvoir cash out
+
 OWNER_ID = 1339332485930160189                   # ID du propriétaire
 MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
 BACKUP_SERVER_ID = 1481205788566618115           # Serveur de backup
@@ -136,6 +145,12 @@ bans_data = {}            # {"guild_id:user_id": {user_id, guild_id, reason, end
 # --- Giveaways (remplace giveaways.json — persistance Discord dans GIVEAWAY_MEMORY_CHANNEL_ID) ---
 giveaway_data = {}        # {message_id: {channel_id, prize, condition, winners_count, end_time, participants, ended}}
 
+# --- Système d'invitations ---
+invite_cache = {}             # {guild_id: {code: {"uses": int, "inviter_id": int|None}, "__vanity__": {...}}} — en mémoire, reconstruit à chaque démarrage
+recently_deleted_invites = {} # {guild_id: {code: {"inviter_id": int, "deleted_at": float}}} — filet de sécurité anti-course (10-15s)
+invite_data = {}              # {"balances": {inviter_id: {"count","balance","total_earned"}}, "cashouts": {request_id: {...}}, "invited_by": {invited_id: inviter_id}}
+already_invited_ids = set()   # IDs (str) déjà comptés comme invités une fois — jamais retirés (anti leave/rejoin farming)
+
 # --- Commandes admin/modo à tracer automatiquement ---
 LOGGED_ADMIN_COMMANDS = {
     'kill', 'setcountchannel', 'setscore', 'lock', 'unlock', 'restore',
@@ -143,7 +158,7 @@ LOGGED_ADMIN_COMMANDS = {
     'tempmute', 'unmute', 'safe', 'removesafe', 'TicketCreatingChannel',
     'SetTableChannel', 'AddTableLine', 'SetTableValue', 'RemoveTableValue',
     'GetTableUserValue', 'RemoveTopBoardRobux', 'backup', 'COMMANDSON',
-    'setuprobloxverify'
+    'setuprobloxverify', 'cashout', 'AdjustInviteBalance', 'ResetInviteFlag'
 }
 
 # --- Salons "mémoire" du bot : jamais loggés dans messages-log (ni suppression, ni édition) ---
@@ -154,6 +169,8 @@ MEMORY_CHANNELS = {
     BAN_LOG_CHANNEL_ID, GIVEAWAY_MEMORY_CHANNEL_ID,
     MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
     ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
+    INVITE_ARRIVAL_CHANNEL_ID, INVITE_DEPART_CHANNEL_ID, INVITE_CASHOUT_CHANNEL_ID,
+    INVITE_DATA_CHANNEL_ID, ALREADY_INVITED_CHANNEL_ID,
 }
 # ==========================================
 
@@ -419,6 +436,9 @@ intents.message_content = True
 intents.members = True
 intents.presences = True   # Nécessaire pour le compteur "membres en ligne" — doit AUSSI être activé
                             # dans le Discord Developer Portal (onglet Bot > Privileged Gateway Intents > Presence Intent)
+intents.invites = True     # Nécessaire pour on_invite_create/on_invite_delete (système d'invitations). Non privilégié,
+                            # rien à activer dans le portail — mais le bot doit avoir la permission "Gérer le serveur"
+                            # pour pouvoir lire guild.invites().
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 bot.remove_command('help')
 
@@ -506,6 +526,161 @@ async def load_giveaways_from_discord():
             except:
                 giveaway_data = {}
             break
+
+# ==========================================
+# HELPERS GÉNÉRIQUES — PERSISTANCE DISCORD (payload potentiellement volumineux)
+# ==========================================
+# Contrairement aux autres systèmes du bot (limités par les 2000 caractères d'un message Discord),
+# ces helpers basculent automatiquement sur un fichier .json en pièce jointe si le payload est trop
+# gros. Utilisé pour le système d'invitations, dont les données grandissent avec le temps.
+
+async def save_json_to_channel(channel_id: int, marker: str, data, search_limit: int = 100):
+    chan = bot.get_channel(channel_id)
+    if not chan:
+        return
+    payload = json.dumps(data, ensure_ascii=False)
+
+    async for msg in chan.history(limit=search_limit):
+        if msg.content == marker or msg.content.startswith(marker):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+
+    if len(payload) <= 1900:
+        await chan.send(f"{marker}{payload}")
+    else:
+        file = discord.File(fp=io.BytesIO(payload.encode("utf-8")), filename="data.json")
+        await chan.send(content=marker, file=file)
+
+async def load_json_from_channel(channel_id: int, marker: str, default, search_limit: int = 100):
+    chan = bot.get_channel(channel_id)
+    if not chan:
+        return default
+    async for msg in chan.history(limit=search_limit):
+        if msg.content == marker and msg.attachments:
+            try:
+                raw = await msg.attachments[0].read()
+                return json.loads(raw.decode("utf-8"))
+            except:
+                return default
+        if msg.content.startswith(marker):
+            try:
+                return json.loads(msg.content[len(marker):])
+            except:
+                return default
+    return default
+
+# ==========================================
+# SYSTÈME D'INVITATIONS — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_invite_data():
+    await save_json_to_channel(INVITE_DATA_CHANNEL_ID, "INVITE_DATA|", invite_data, search_limit=200)
+
+async def load_invite_data():
+    global invite_data
+    invite_data = await load_json_from_channel(
+        INVITE_DATA_CHANNEL_ID, "INVITE_DATA|",
+        {"balances": {}, "cashouts": {}, "invited_by": {}}, search_limit=200
+    )
+    invite_data.setdefault("balances", {})
+    invite_data.setdefault("cashouts", {})
+    invite_data.setdefault("invited_by", {})
+
+async def save_already_invited():
+    await save_json_to_channel(ALREADY_INVITED_CHANNEL_ID, "ALREADY_INVITED|", list(already_invited_ids), search_limit=200)
+
+async def load_already_invited():
+    global already_invited_ids
+    ids = await load_json_from_channel(ALREADY_INVITED_CHANNEL_ID, "ALREADY_INVITED|", [], search_limit=200)
+    already_invited_ids = set(str(i) for i in ids)
+
+# ==========================================
+# SYSTÈME D'INVITATIONS — SUIVI DES INVITATIONS
+# ==========================================
+
+async def refresh_invite_cache(guild):
+    """À appeler au démarrage (on_ready) : construit l'instantané initial des invitations du serveur."""
+    cache_entry = {}
+    try:
+        invites = await guild.invites()
+        for inv in invites:
+            cache_entry[inv.code] = {"uses": inv.uses, "inviter_id": inv.inviter.id if inv.inviter else None}
+    except discord.Forbidden:
+        await send_log(
+            f"⚠️ **Invitations** : permission `Gérer le serveur` manquante sur **{guild.name}** — "
+            f"le suivi des invitations ne fonctionnera pas sur ce serveur."
+        )
+    except Exception:
+        pass
+
+    try:
+        vanity = await guild.vanity_invite()
+        if vanity:
+            cache_entry["__vanity__"] = {"uses": vanity.uses, "inviter_id": None}
+    except Exception:
+        pass
+
+    invite_cache[guild.id] = cache_entry
+
+async def find_inviter(guild):
+    """
+    Détermine l'ID de l'utilisateur qui vient d'inviter un nouveau membre, en comparant
+    l'état des invitations juste avant/après son arrivée. Retourne None si indéterminable
+    (ex : lien "Découverte" de Discord, invitation supprimée sans qu'on ait pu la relier).
+    Limite connue : si deux invitations différentes sont utilisées à la même seconde,
+    seule la première trouvée est retenue (cas très rare en pratique).
+    """
+    gid = guild.id
+    old_snapshot = dict(invite_cache.get(gid, {}))
+    try:
+        new_invites = await guild.invites()
+    except Exception:
+        new_invites = []
+    new_map = {inv.code: inv for inv in new_invites}
+
+    inviter_id = None
+
+    # Cas 1 : une invitation existante a un compteur d'utilisation plus élevé qu'avant
+    for code, new_inv in new_map.items():
+        old = old_snapshot.get(code)
+        if old and new_inv.uses > old.get("uses", 0):
+            inviter_id = new_inv.inviter.id if new_inv.inviter else None
+            break
+
+    # Cas 2 : une invitation à usage unique a disparu entre les deux instantanés
+    if inviter_id is None:
+        for code, old in old_snapshot.items():
+            if code == "__vanity__":
+                continue
+            if code not in new_map:
+                inviter_id = old.get("inviter_id")
+                break
+
+    # Cas 3 : filet de sécurité — suppression de l'invitation détectée par on_invite_delete
+    # juste avant qu'on ait pu comparer nous-mêmes (course entre les deux événements)
+    if inviter_id is None:
+        recent = recently_deleted_invites.get(gid, {})
+        now = time.time()
+        for code, info in list(recent.items()):
+            if now - info["deleted_at"] <= 15:
+                inviter_id = info["inviter_id"]
+                recent.pop(code, None)
+                break
+
+    # Mise à jour de l'instantané pour la prochaine arrivée
+    new_cache = {inv.code: {"uses": inv.uses, "inviter_id": inv.inviter.id if inv.inviter else None} for inv in new_invites}
+    try:
+        vanity = await guild.vanity_invite()
+        if vanity:
+            new_cache["__vanity__"] = {"uses": vanity.uses, "inviter_id": None}
+    except Exception:
+        pass
+    invite_cache[gid] = new_cache
+
+    return inviter_id
 
 # ==========================================
 # TEMPBAN — PERSISTANCE DISCORD
@@ -1202,6 +1377,53 @@ class GiveawayView(discord.ui.View):
         await save_giveaways_to_discord()
         await interaction.message.delete()
 
+class ConfirmPaymentView(discord.ui.View):
+    """Bouton de confirmation de paiement pour une demande de cashout d'invitations.
+    Le message n'est jamais supprimé : il est simplement modifié pour conserver un log permanent."""
+
+    def __init__(self, request_id: str):
+        super().__init__(timeout=None)
+        btn = discord.ui.Button(
+            label="✅ Confirmer le paiement",
+            style=discord.ButtonStyle.success,
+            custom_id=f"confirm_payment:{request_id}"
+        )
+        btn.callback = self.confirm_callback
+        self.add_item(btn)
+
+    async def confirm_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message("❌ Réservé au propriétaire.", ephemeral=True)
+
+        request_id = interaction.data["custom_id"].split(":", 1)[1]
+        cashouts = invite_data.setdefault("cashouts", {})
+        record = cashouts.get(request_id)
+        if not record:
+            return await interaction.response.send_message("❌ Demande de cashout introuvable.", ephemeral=True)
+        if record.get("status") == "paid":
+            return await interaction.response.send_message("ℹ️ Ce paiement a déjà été confirmé.", ephemeral=True)
+
+        paid_at = discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M UTC")
+        record["status"] = "paid"
+        record["paid_by"] = interaction.user.id
+        record["paid_at"] = paid_at
+        await save_invite_data()
+
+        embed = interaction.message.embeds[0]
+        status_text = f"✅ Payé le {paid_at} par {interaction.user.mention}"
+        field_names = [f.name for f in embed.fields]
+        if "Statut" in field_names:
+            embed.set_field_at(field_names.index("Statut"), name="Statut", value=status_text, inline=False)
+        else:
+            embed.add_field(name="Statut", value=status_text, inline=False)
+        embed.color = discord.Color.green()
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message("✅ Paiement confirmé et journalisé.", ephemeral=True)
+
 # ==========================================
 # VIEWS — TICKETS
 # ==========================================
@@ -1822,6 +2044,15 @@ async def on_ready():
     await load_bans_from_discord()
     await load_giveaways_from_discord()
 
+    # --- Système d'invitations ---
+    await load_invite_data()
+    await load_already_invited()
+    for guild in bot.guilds:
+        await refresh_invite_cache(guild)
+    for request_id, record in invite_data.get("cashouts", {}).items():
+        if record.get("status") == "pending":
+            bot.add_view(ConfirmPaymentView(request_id))
+
     if not check_giveaways.is_running():
         check_giveaways.start()
     if not check_bans.is_running():
@@ -1913,6 +2144,25 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.event
+async def on_invite_create(invite):
+    gid = invite.guild.id
+    invite_cache.setdefault(gid, {})[invite.code] = {
+        "uses": invite.uses,
+        "inviter_id": invite.inviter.id if invite.inviter else None
+    }
+
+@bot.event
+async def on_invite_delete(invite):
+    gid = invite.guild.id
+    cached = invite_cache.get(gid, {}).pop(invite.code, None)
+    inviter_id = cached.get("inviter_id") if cached else (invite.inviter.id if invite.inviter else None)
+    if inviter_id:
+        recently_deleted_invites.setdefault(gid, {})[invite.code] = {
+            "inviter_id": inviter_id,
+            "deleted_at": time.time()
+        }
+
+@bot.event
 async def on_member_join(member):
     if member.bot:
         return
@@ -1940,6 +2190,40 @@ async def on_member_join(member):
         embed.add_field(name="Âge du compte",  value=f"{account_age} jour(s){age_flag}",                inline=True)
         embed.set_footer(text=f"Membres : {member.guild.member_count}")
         await log_chan.send(embed=embed)
+
+    # --- Système d'invitations ---
+    invited_str = str(member.id)
+    already_seen = invited_str in already_invited_ids
+    inviter_id = await find_inviter(member.guild)
+
+    if inviter_id:
+        invite_data.setdefault("invited_by", {})[invited_str] = inviter_id
+
+    arrival_chan = bot.get_channel(INVITE_ARRIVAL_CHANNEL_ID)
+
+    if inviter_id and not already_seen:
+        balances = invite_data.setdefault("balances", {})
+        entry = balances.get(str(inviter_id), {"count": 0, "balance": 0, "total_earned": 0})
+        entry["count"] = entry.get("count", 0) + 1
+        entry["balance"] = entry.get("balance", 0) + INVITE_REWARD_PER_INVITE
+        entry["total_earned"] = entry.get("total_earned", 0) + INVITE_REWARD_PER_INVITE
+        balances[str(inviter_id)] = entry
+        already_invited_ids.add(invited_str)
+        await save_invite_data()
+        await save_already_invited()
+
+        if arrival_chan:
+            await arrival_chan.send(f"📥 <@{inviter_id}> a invité {member.mention} ! (+{INVITE_REWARD_PER_INVITE} Robux)")
+    elif inviter_id and already_seen:
+        await save_invite_data()  # on garde le mapping invited_by à jour même sans rémunération
+        if arrival_chan:
+            await arrival_chan.send(f"👋 {member.mention} est de retour parmi nous (déjà invité par le passé, non rémunéré).")
+    else:
+        if not already_seen:
+            already_invited_ids.add(invited_str)
+            await save_already_invited()
+        if arrival_chan:
+            await arrival_chan.send(f"👋 Bienvenue {member.mention} !")
 @bot.event
 async def on_guild_channel_delete(channel):
     guild = channel.guild
@@ -2008,6 +2292,18 @@ async def on_member_remove(member):
     embed.add_field(name="Rôles",               value=roles_str,                   inline=False)
     embed.set_footer(text=f"Membres : {member.guild.member_count}")
     await log_chan.send(embed=embed)
+
+    # --- Système d'invitations ---
+    if not member.bot:
+        invite_depart_chan = bot.get_channel(INVITE_DEPART_CHANNEL_ID)
+        if invite_depart_chan:
+            known_inviter_id = invite_data.get("invited_by", {}).get(str(member.id))
+            if known_inviter_id:
+                await invite_depart_chan.send(
+                    f"📤 {member} (invité par <@{known_inviter_id}>) vient de quitter le serveur."
+                )
+            else:
+                await invite_depart_chan.send(f"📤 {member} vient de quitter le serveur.")
 
 @bot.event
 async def on_message_delete(message):
@@ -2219,11 +2515,16 @@ async def help(ctx):
         f"**{COMMAND_PREFIX}streak (@user)** : Streak de daily consécutifs."
     ), inline=False)
     embed.add_field(name="🎮 Roblox", value=(
-        f"**{COMMAND_PREFIX}robloxprofile (@user / pseudo)** : Affiche le profil Roblox lié d'un membre. Sans argument = ton propre profil."
+        f"**{COMMAND_PREFIX}profile (@user / pseudo)** : Profil complet d'un membre (Roblox, niveau, invitations). Sans argument = ton propre profil."
     ), inline=False)
     embed.add_field(name="💸 Donations", value=(
         f"**{COMMAND_PREFIX}RobuxLeaderBoard** : Affiche le topboard complet dans le salon courant.\n"
         f"**{COMMAND_PREFIX}RobuxDonatedProfile @user** : Profil de donation d'un membre (si dans le topboard)."
+    ), inline=False)
+    embed.add_field(name="📨 Invitations", value=(
+        f"**{COMMAND_PREFIX}invites (@user)** : Ton nombre d'invitations et ton solde. Sans argument = toi-même.\n"
+        f"**{COMMAND_PREFIX}inviteleaderboard** : Top 10 des inviteurs.\n"
+        f"**{COMMAND_PREFIX}cashout [montant]** : Demande le paiement d'un montant (min. {INVITE_CASHOUT_MINIMUM} Robux)."
     ), inline=False)
 
     is_admin = ctx.author.guild_permissions.administrator or is_owner
@@ -2269,6 +2570,11 @@ async def help(ctx):
         ), inline=False)
         embed.add_field(name="💸 Owner — Donations", value=(
             f"**{COMMAND_PREFIX}RemoveTopBoardRobux [pseudo] [montant]** : Retire des Robux du total d'un donateur."
+        ), inline=False)
+        embed.add_field(name="📨 Owner — Invitations", value=(
+            f"**{COMMAND_PREFIX}AdjustInviteBalance @user [montant] [raison]** : Ajuste le solde d'un membre (+/-).\n"
+            f"**{COMMAND_PREFIX}ResetInviteFlag @user** : Permet à un ID de compter à nouveau comme nouvelle invitation.\n"
+            f"→ Confirmation des paiements via bouton dans <#{INVITE_CASHOUT_CHANNEL_ID}>."
         ), inline=False)
         embed.add_field(name="💾 Owner — Backup & Setup", value=(
             f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
@@ -2878,7 +3184,7 @@ async def GetTableUserValue(ctx, user: discord.Member, column: str = None):
 # ==========================================
 
 @bot.command()
-async def robloxprofile(ctx, *, user_input: str = None):
+async def profile(ctx, *, user_input: str = None):
     target_member = None
 
     if user_input is None:
@@ -2900,30 +3206,53 @@ async def robloxprofile(ctx, *, user_input: str = None):
     uid = str(target_member.id)
     link_data = roblox_links.get(uid)
 
-    if not link_data:
-        return await ctx.send(
-            f"❌ **{target_member.display_name}** n'a pas encore lié son compte Roblox."
-        )
-
-    roblox_username = link_data.get("roblox_username", "Inconnu")
-    roblox_id       = link_data.get("roblox_id", "?")
-    linked_at       = link_data.get("linked_at", "Inconnu")
-
     embed = discord.Embed(
-        title=f"🎮 Profil Roblox — {roblox_username}",
+        title=f"📋 Profil de {target_member.display_name}",
         color=discord.Color.blurple()
     )
     embed.set_thumbnail(url=target_member.display_avatar.url)
-    embed.add_field(name="👤 Discord",         value=target_member.mention,  inline=True)
-    embed.add_field(name="🎮 Pseudo Roblox",   value=f"**{roblox_username}**", inline=True)
-    embed.add_field(name="🆔 Roblox ID",       value=f"`{roblox_id}`",        inline=True)
-    embed.add_field(name="📅 Lié le",          value=linked_at,               inline=True)
+
+    # --- Roblox ---
+    if link_data:
+        roblox_username = link_data.get("roblox_username", "Inconnu")
+        roblox_id       = link_data.get("roblox_id", "?")
+        linked_at       = link_data.get("linked_at", "Inconnu")
+        embed.add_field(name="🎮 Pseudo Roblox", value=f"**{roblox_username}**", inline=True)
+        embed.add_field(name="🆔 Roblox ID",     value=f"`{roblox_id}`",        inline=True)
+        embed.add_field(name="📅 Lié le",        value=linked_at,               inline=True)
+        embed.add_field(
+            name="🔗 Profil Roblox",
+            value=f"[Voir sur Roblox](https://www.roblox.com/users/{roblox_id}/profile)",
+            inline=False
+        )
+    else:
+        embed.add_field(name="🎮 Roblox", value="❌ Compte Roblox non lié.", inline=False)
+
+    # --- Niveau / XP ---
+    xp_entry = xp_data.get(uid, {"xp": 0, "level": 0})
+    level = get_level(xp_entry.get("xp", 0))
     embed.add_field(
-        name="🔗 Profil",
-        value=f"[Voir sur Roblox](https://www.roblox.com/users/{roblox_id}/profile)",
+        name="📊 Niveau",
+        value=f"**{level}** ({xp_entry.get('xp', 0):,} XP)".replace(",", " "),
         inline=True
     )
-    embed.set_footer(text="Liaison OAuth Roblox officielle ✅")
+
+    # --- Invitations ---
+    invite_entry = invite_data.get("balances", {}).get(uid, {"count": 0, "balance": 0, "total_earned": 0})
+    embed.add_field(
+        name="📨 Invitations",
+        value=f"**{invite_entry.get('count', 0)}** validée(s)",
+        inline=True
+    )
+    balance = invite_entry.get("balance", 0)
+    cashable = "✅ Cashable" if balance >= INVITE_CASHOUT_MINIMUM else f"(min. {INVITE_CASHOUT_MINIMUM} Robux)"
+    embed.add_field(
+        name="💸 Robux à cash out",
+        value=f"**{balance}** Robux {cashable}",
+        inline=True
+    )
+
+    embed.set_footer(text="Liaison OAuth Roblox officielle ✅" if link_data else "Compte Roblox non lié — <aav>setuprobloxverify pour se lier")
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -3034,6 +3363,128 @@ async def RobuxDonatedProfile(ctx, *, user_input: str = None):
     )
     embed.set_footer(text="💝 Merci pour ton soutien à Aavixyria !")
     await ctx.send(embed=embed)
+
+# ==========================================
+# COMMANDES — SYSTÈME D'INVITATIONS
+# ==========================================
+
+@bot.command()
+async def invites(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    uid = str(target.id)
+    entry = invite_data.get("balances", {}).get(uid, {"count": 0, "balance": 0, "total_earned": 0})
+
+    embed = discord.Embed(title=f"📨 Invitations de {target.display_name}", color=discord.Color.blurple())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Invitations valides", value=f"**{entry.get('count', 0)}**", inline=True)
+    embed.add_field(name="Solde actuel",        value=f"**{entry.get('balance', 0)}** Robux", inline=True)
+    embed.add_field(name="Total gagné (historique)", value=f"**{entry.get('total_earned', 0)}** Robux", inline=True)
+    embed.set_footer(text=f"Minimum pour cash out : {INVITE_CASHOUT_MINIMUM} Robux")
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def inviteleaderboard(ctx):
+    balances = invite_data.get("balances", {})
+    sorted_inviters = sorted(balances.items(), key=lambda x: x[1].get("count", 0), reverse=True)[:10]
+
+    if not sorted_inviters:
+        return await ctx.send("Aucune invitation enregistrée pour le moment.")
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, entry) in enumerate(sorted_inviters):
+        member = ctx.guild.get_member(int(uid))
+        name = member.display_name if member else f"ID:{uid}"
+        medal = medals[i] if i < 3 else f"`#{i+1}`"
+        lines.append(
+            f"{medal} **{name}** — {entry.get('count', 0)} invitation(s) · "
+            f"{entry.get('balance', 0)} Robux en solde"
+        )
+
+    embed = discord.Embed(title="🏆 Leaderboard des invitations", color=discord.Color.gold())
+    embed.description = "\n".join(lines)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def cashout(ctx, amount: int):
+    uid = str(ctx.author.id)
+    balances = invite_data.setdefault("balances", {})
+    entry = balances.get(uid, {"count": 0, "balance": 0, "total_earned": 0})
+    current_balance = entry.get("balance", 0)
+
+    if amount < INVITE_CASHOUT_MINIMUM:
+        return await ctx.send(f"❌ Le montant minimum pour un cashout est de **{INVITE_CASHOUT_MINIMUM} Robux**.")
+    if amount > current_balance:
+        return await ctx.send(f"❌ Solde insuffisant. Ton solde actuel est de **{current_balance} Robux**.")
+
+    entry["balance"] = current_balance - amount
+    balances[uid] = entry
+
+    request_id = str(uuid.uuid4())
+    cashouts = invite_data.setdefault("cashouts", {})
+    cashouts[request_id] = {
+        "user_id": ctx.author.id,
+        "username": str(ctx.author),
+        "amount": amount,
+        "status": "pending",
+        "requested_at": discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M UTC"),
+        "paid_by": None,
+        "paid_at": None
+    }
+    await save_invite_data()
+
+    chan = bot.get_channel(INVITE_CASHOUT_CHANNEL_ID)
+    if chan:
+        embed = discord.Embed(title="💸 Demande de cashout", color=discord.Color.orange())
+        embed.set_thumbnail(url=ctx.author.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{ctx.author.mention} (`{ctx.author}`)", inline=True)
+        embed.add_field(name="Montant",     value=f"**{amount}** Robux",                    inline=True)
+        embed.add_field(name="Statut",      value="⏳ En attente de paiement",               inline=False)
+        embed.set_footer(text=f"ID de la demande : {request_id[:8]}")
+        await chan.send(embed=embed, view=ConfirmPaymentView(request_id))
+        await ctx.send(
+            f"✅ Demande de cashout de **{amount} Robux** envoyée dans {chan.mention}.\n"
+            f"Solde restant : **{entry['balance']} Robux**."
+        )
+    else:
+        await ctx.send("⚠️ Salon de cashout introuvable, mais la demande a été enregistrée.")
+
+@bot.command()
+async def AdjustInviteBalance(ctx, user: discord.Member, amount: int, *, reason: str = "Aucune raison fournie"):
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
+
+    uid = str(user.id)
+    balances = invite_data.setdefault("balances", {})
+    entry = balances.get(uid, {"count": 0, "balance": 0, "total_earned": 0})
+    entry["balance"] = max(0, entry.get("balance", 0) + amount)
+    if amount > 0:
+        entry["total_earned"] = entry.get("total_earned", 0) + amount
+    balances[uid] = entry
+    await save_invite_data()
+
+    sign = "+" if amount >= 0 else ""
+    await ctx.send(
+        f"✅ Solde de {user.mention} ajusté de **{sign}{amount} Robux**.\n"
+        f"Nouveau solde : **{entry['balance']} Robux**\n"
+        f"Raison : {reason}"
+    )
+
+@bot.command()
+async def ResetInviteFlag(ctx, user: discord.Member):
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
+
+    uid = str(user.id)
+    if uid in already_invited_ids:
+        already_invited_ids.discard(uid)
+        await save_already_invited()
+        await ctx.send(
+            f"✅ {user.mention} peut de nouveau être compté comme une nouvelle invitation "
+            f"s'il rejoint le serveur à l'avenir."
+        )
+    else:
+        await ctx.send(f"ℹ️ {user.mention} n'était pas dans la liste des membres déjà invités.")
 
 # ==========================================
 # VIEW — PIERRE FEUILLE CISEAUX
