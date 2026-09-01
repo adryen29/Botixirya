@@ -2289,42 +2289,45 @@ async def on_member_remove(member):
     except Exception:
         pass
     log_chan = bot.get_channel(MEMBER_LOG_CHANNEL_ID)
-    if not log_chan:
-        return
+    if log_chan:
+        time_on_server = "Inconnu"
+        if member.joined_at:
+            delta = discord.utils.utcnow() - member.joined_at
+            days  = delta.days
+            hours = delta.seconds // 3600
+            time_on_server = f"{days}j {hours}h" if days else f"{hours}h"
 
-    time_on_server = "Inconnu"
-    if member.joined_at:
-        delta = discord.utils.utcnow() - member.joined_at
-        days  = delta.days
-        hours = delta.seconds // 3600
-        time_on_server = f"{days}j {hours}h" if days else f"{hours}h"
+        roles = [r.name for r in member.roles if r != member.guild.default_role]
+        roles_str = ", ".join(roles[:15]) if roles else "Aucun"
 
-    roles = [r.name for r in member.roles if r != member.guild.default_role]
-    roles_str = ", ".join(roles[:15]) if roles else "Aucun"
-
-    embed = discord.Embed(
-        title="📤 Membre parti",
-        color=discord.Color.red(),
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Utilisateur",         value=f"{member} (`{member.id}`)", inline=False)
-    embed.add_field(name="Temps sur le serveur", value=time_on_server,             inline=True)
-    embed.add_field(name="Rôles",               value=roles_str,                   inline=False)
-    embed.set_footer(text=f"Membres : {member.guild.member_count}")
-    await log_chan.send(embed=embed)
+        embed = discord.Embed(
+            title="📤 Membre parti",
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Utilisateur",         value=f"{member} (`{member.id}`)", inline=False)
+        embed.add_field(name="Temps sur le serveur", value=time_on_server,             inline=True)
+        embed.add_field(name="Rôles",               value=roles_str,                   inline=False)
+        embed.set_footer(text=f"Membres : {member.guild.member_count}")
+        await log_chan.send(embed=embed)
 
     # --- Système d'invitations ---
-    if not member.bot:
-        invite_depart_chan = bot.get_channel(INVITE_DEPART_CHANNEL_ID)
-        if invite_depart_chan:
-            known_inviter_id = invite_data.get("invited_by", {}).get(str(member.id))
-            if known_inviter_id:
-                await invite_depart_chan.send(
-                    f"📤 {member} (invité par <@{known_inviter_id}>) vient de quitter le serveur."
-                )
-            else:
-                await invite_depart_chan.send(f"📤 {member} vient de quitter le serveur.")
+    invite_depart_chan = bot.get_channel(INVITE_DEPART_CHANNEL_ID)
+    if invite_depart_chan:
+        known_inviter_id = invite_data.get("invited_by", {}).get(str(member.id))
+        if known_inviter_id:
+            await invite_depart_chan.send(
+                f"📤 {member} (invité par <@{known_inviter_id}>) vient de quitter le serveur."
+            )
+        else:
+            await invite_depart_chan.send(f"📤 {member} vient de quitter le serveur.")
+
+    # --- Flush des données "identité" désormais obsolètes (garde XP, invitations, donations, etc.) ---
+    uid = str(member.id)
+    if uid in roblox_links:
+        del roblox_links[uid]
+        await save_roblox_links()
 
 @bot.event
 async def on_message_delete(message):
