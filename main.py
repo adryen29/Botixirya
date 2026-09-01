@@ -53,6 +53,24 @@ ALREADY_INVITED_CHANNEL_ID = 1544426137164455967   # Liste permanente des ID dé
 INVITE_REWARD_PER_INVITE = 10   # Robux crédités par invitation valide
 INVITE_CASHOUT_MINIMUM = 50     # Solde minimum requis pour pouvoir cash out
 
+# --- Messages de bienvenue du système d'invitations (un choisi au hasard à chaque arrivée) ---
+INVITE_WELCOME_CREDITED = [
+    "🎉 Bienvenue {invited} ! Tu as été invité(e) par {inviter}, merci à lui/elle de faire grandir la communauté !",
+    "👋 Bienvenue parmi nous, {invited} ! → invité(e) par {inviter} 🎉",
+    "🎉 **{invited}** vient de nous rejoindre !\nInvité(e) par **{inviter}**",
+    "🥳 Un nouveau visage ! Bienvenue {invited}, ravi de t'avoir avec nous grâce à {inviter} !",
+    "📥 {invited} a rejoint le serveur, invité(e) par {inviter}. Bienvenue à toi !",
+]
+INVITE_WELCOME_ALREADY_SEEN = [
+    "👋 {invited} nous rejoint à nouveau, ravis de te revoir !",
+    "🔄 Rebonjour {invited}, content de te retrouver parmi nous !",
+    "👋 {invited} est de retour, bienvenue à nouveau !",
+]
+INVITE_WELCOME_UNKNOWN = [
+    "👋 Bienvenue {invited}, on est content de t'avoir parmi nous !",
+    "🎉 {invited} vient de rejoindre le serveur, bienvenue à toi !",
+]
+
 OWNER_ID = 1339332485930160189                   # ID du propriétaire
 MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
 BACKUP_SERVER_ID = 1481205788566618115           # Serveur de backup
@@ -2213,17 +2231,20 @@ async def on_member_join(member):
         await save_already_invited()
 
         if arrival_chan:
-            await arrival_chan.send(f"📥 <@{inviter_id}> a invité {member.mention} ! (+{INVITE_REWARD_PER_INVITE} Robux)")
+            msg = random.choice(INVITE_WELCOME_CREDITED).format(invited=member.mention, inviter=f"<@{inviter_id}>")
+            await arrival_chan.send(msg)
     elif inviter_id and already_seen:
         await save_invite_data()  # on garde le mapping invited_by à jour même sans rémunération
         if arrival_chan:
-            await arrival_chan.send(f"👋 {member.mention} est de retour parmi nous (déjà invité par le passé, non rémunéré).")
+            msg = random.choice(INVITE_WELCOME_ALREADY_SEEN).format(invited=member.mention)
+            await arrival_chan.send(msg)
     else:
         if not already_seen:
             already_invited_ids.add(invited_str)
             await save_already_invited()
         if arrival_chan:
-            await arrival_chan.send(f"👋 Bienvenue {member.mention} !")
+            msg = random.choice(INVITE_WELCOME_UNKNOWN).format(invited=member.mention)
+            await arrival_chan.send(msg)
 @bot.event
 async def on_guild_channel_delete(channel):
     guild = channel.guild
