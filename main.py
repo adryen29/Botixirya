@@ -24,15 +24,15 @@ DB_CHANNEL_ID = 1479105188454338611             # Salon Discord servant de base 
 VERIFY_CHANNEL_ID = 1478658827682582662
 ROLE_UNVERIFIED_ID = 1478658867415089263
 ROLE_VERIFIED_ID = 1477170552950231164
-GIVEAWAY_FILE = "giveaways.json"
 MANUAL_LOG_CHANNEL_ID = 1510623278379565288   # Logs actions manuelles Discord
 
 
-BAN_LOG_CHANNEL_ID = 1481201790375563498         # Logs bans
+BAN_LOG_CHANNEL_ID = 1481201790375563498         # Logs bans + mémoire persistance des bans
 KICK_LOG_CHANNEL_ID = 1481202403574284310        # Logs kicks
 MUTE_LOG_CHANNEL_ID = 1481202820500684841        # Logs mutes
 MUTED_ROLE_ID = 1481203639107325983              # Rôle Muted
-BANS_FILE = "bans.json"
+
+GIVEAWAY_MEMORY_CHANNEL_ID = 1543983392733790329 # Mémoire des giveaways (persistance Discord)
 
 TEMPBAN_LOG_CHANNEL_ID  = 1510401125616980169    # Logs + mémoire tempbans
 TEMPMUTE_LOG_CHANNEL_ID = 1510400362526543934    # Logs + mémoire tempmutes
@@ -41,6 +41,8 @@ MEMBER_LOG_CHANNEL_ID        = 1510621031960805396   # Arrivées & départs
 MESSAGES_LOG_CHANNEL_ID      = 1510620947621613599   # Messages supprimés & modifiés
 ADMIN_ACTIONS_LOG_CHANNEL_ID = 1510620898363707533   # Commandes admin/modo utilisées
 VERIF_HISTORY_LOG_CHANNEL_ID = 1510620834547367936   # Historique vérifications Roblox
+
+ONLINE_COUNTER_CHANNEL_ID = 1477628409826906183  # Salon vocal affichant le nombre de membres en ligne
 
 OWNER_ID = 1339332485930160189                   # ID du propriétaire
 MAIN_SERVER_ID = 1472951773026062482             # Serveur principal
@@ -128,6 +130,12 @@ roblox_links  = {}       # {discord_user_id: {"roblox_id": str, "roblox_username
 tempban_data  = {}       # {"guild_id:user_id": {user_id, guild_id, end_time, reason, moderator_id, username}}
 tempmute_data = {}       # même structure
 
+# --- Bans classiques (remplace bans.json — persistance Discord dans BAN_LOG_CHANNEL_ID) ---
+bans_data = {}            # {"guild_id:user_id": {user_id, guild_id, reason, end_time, moderator}}
+
+# --- Giveaways (remplace giveaways.json — persistance Discord dans GIVEAWAY_MEMORY_CHANNEL_ID) ---
+giveaway_data = {}        # {message_id: {channel_id, prize, condition, winners_count, end_time, participants, ended}}
+
 # --- Commandes admin/modo à tracer automatiquement ---
 LOGGED_ADMIN_COMMANDS = {
     'kill', 'setcountchannel', 'setscore', 'lock', 'unlock', 'restore',
@@ -136,6 +144,16 @@ LOGGED_ADMIN_COMMANDS = {
     'SetTableChannel', 'AddTableLine', 'SetTableValue', 'RemoveTableValue',
     'GetTableUserValue', 'RemoveTopBoardRobux', 'backup', 'COMMANDSON',
     'setuprobloxverify'
+}
+
+# --- Salons "mémoire" du bot : jamais loggés dans messages-log (ni suppression, ni édition) ---
+MEMORY_CHANNELS = {
+    DB_CHANNEL_ID, XP_MEMORY_CHANNEL_ID, DONATION_MEMORY_CHANNEL_ID,
+    TICKET_MEMORY_CHANNEL_ID, TABLE_LOG_CHANNEL_ID, ROBLOX_LINKS_CHANNEL_ID,
+    ROLE_BACKUP_CHANNEL_ID, TEMPBAN_LOG_CHANNEL_ID, TEMPMUTE_LOG_CHANNEL_ID,
+    BAN_LOG_CHANNEL_ID, GIVEAWAY_MEMORY_CHANNEL_ID,
+    MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
+    ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
 }
 # ==========================================
 
@@ -399,6 +417,8 @@ def keep_alive():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.presences = True   # Nécessaire pour le compteur "membres en ligne" — doit AUSSI être activé
+                            # dans le Discord Developer Portal (onglet Bot > Privileged Gateway Intents > Presence Intent)
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 bot.remove_command('help')
 
@@ -415,32 +435,6 @@ async def global_backup_check(ctx):
 # GESTION DES DONNÉES
 # ==========================================
 
-def save_giveaway(data):
-    with open(GIVEAWAY_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-def load_giveaway():
-    if os.path.exists(GIVEAWAY_FILE):
-        try:
-            with open(GIVEAWAY_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def load_bans():
-    if os.path.exists(BANS_FILE):
-        try:
-            with open(BANS_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_bans(data):
-    with open(BANS_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
-
 async def save_counting_to_db():
     db_chan = bot.get_channel(DB_CHANNEL_ID)
     if db_chan:
@@ -450,6 +444,68 @@ async def send_log(content):
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if channel:
         await channel.send(content)
+
+# ==========================================
+# BANS — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_bans_to_discord():
+    chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(bans_data, ensure_ascii=False)
+    async for msg in chan.history(limit=200):
+        if msg.content.startswith("BANS_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"BANS_SAVE|{payload}")
+
+async def load_bans_from_discord():
+    global bans_data
+    chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=200):
+        if msg.content.startswith("BANS_SAVE|"):
+            try:
+                bans_data = json.loads(msg.content[len("BANS_SAVE|"):])
+            except:
+                bans_data = {}
+            break
+
+# ==========================================
+# GIVEAWAY — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_giveaways_to_discord():
+    chan = bot.get_channel(GIVEAWAY_MEMORY_CHANNEL_ID)
+    if not chan:
+        return
+    payload = json.dumps(giveaway_data, ensure_ascii=False)
+    async for msg in chan.history(limit=100):
+        if msg.content.startswith("GIVEAWAY_SAVE|"):
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+    await chan.send(f"GIVEAWAY_SAVE|{payload}")
+
+async def load_giveaways_from_discord():
+    global giveaway_data
+    chan = bot.get_channel(GIVEAWAY_MEMORY_CHANNEL_ID)
+    if not chan:
+        return
+    async for msg in chan.history(limit=100):
+        if msg.content.startswith("GIVEAWAY_SAVE|"):
+            try:
+                giveaway_data = json.loads(msg.content[len("GIVEAWAY_SAVE|"):])
+            except:
+                giveaway_data = {}
+            break
 
 # ==========================================
 # TEMPBAN — PERSISTANCE DISCORD
@@ -1118,24 +1174,22 @@ class GiveawayView(discord.ui.View):
 
     @discord.ui.button(label="Participer ! 🎉", style=discord.ButtonStyle.blurple, custom_id="join_gw")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_giveaway()
         gw_id = str(interaction.message.id)
-        if gw_id not in data or data[gw_id]['ended']:
+        if gw_id not in giveaway_data or giveaway_data[gw_id]['ended']:
             return await interaction.response.send_message("Terminé.", ephemeral=True)
-        if interaction.user.id in data[gw_id]['participants']:
+        if interaction.user.id in giveaway_data[gw_id]['participants']:
             return await interaction.response.send_message("Déjà inscrit !", ephemeral=True)
-        data[gw_id]['participants'].append(interaction.user.id)
-        save_giveaway(data)
+        giveaway_data[gw_id]['participants'].append(interaction.user.id)
+        await save_giveaways_to_discord()
         await interaction.response.send_message("Inscrit !", ephemeral=True)
 
     @discord.ui.button(label="Reroll 🎲", style=discord.ButtonStyle.gray, custom_id="reroll_gw")
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             return
-        data = load_giveaway()
         gw_id = str(interaction.message.id)
-        if gw_id in data and data[gw_id]['participants']:
-            winner = random.choice(data[gw_id]['participants'])
+        if gw_id in giveaway_data and giveaway_data[gw_id]['participants']:
+            winner = random.choice(giveaway_data[gw_id]['participants'])
             await interaction.channel.send(f"🎲 Nouveau gagnant : <@{winner}>")
             await interaction.response.send_message("Fait.", ephemeral=True)
 
@@ -1143,6 +1197,9 @@ class GiveawayView(discord.ui.View):
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             return
+        gw_id = str(interaction.message.id)
+        giveaway_data.pop(gw_id, None)
+        await save_giveaways_to_discord()
         await interaction.message.delete()
 
 # ==========================================
@@ -1290,10 +1347,9 @@ class CloseTicketView(discord.ui.View):
 
 @tasks.loop(seconds=30)
 async def check_giveaways():
-    data = load_giveaway()
     now = time.time()
     changed = False
-    for msg_id, gw in list(data.items()):
+    for msg_id, gw in list(giveaway_data.items()):
         if not gw['ended'] and now >= gw['end_time']:
             gw['ended'] = True
             changed = True
@@ -1318,15 +1374,14 @@ async def check_giveaways():
             except:
                 pass
     if changed:
-        save_giveaway(data)
+        await save_giveaways_to_discord()
 
 @tasks.loop(seconds=60)
 async def check_bans():
-    bans = load_bans()
     now = time.time()
     to_remove = []
 
-    for key, ban_data in list(bans.items()):
+    for key, ban_data in list(bans_data.items()):
         if ban_data.get('end_time') and now >= ban_data['end_time']:
             guild = bot.get_guild(ban_data['guild_id'])
             if guild:
@@ -1343,10 +1398,10 @@ async def check_bans():
                     pass
                 to_remove.append(key)
 
-    for key in to_remove:
-        del bans[key]
     if to_remove:
-        save_bans(bans)
+        for key in to_remove:
+            bans_data.pop(key, None)
+        await save_bans_to_discord()
 
 @tasks.loop(seconds=30)
 async def check_tempbans():
@@ -1476,6 +1531,7 @@ async def enforce_permissions():
         roblox_linked_role = guild.get_role(ROLE_ROBLOX_LINKED_ID)
 
         for channel in guild.channels:
+            channel_changed = False
 
             if unverified_role:
                 is_unverified_exception = (
@@ -1493,6 +1549,7 @@ async def enforce_permissions():
                                 send_messages=False,
                                 reason="enforce_permissions : unverified bloqué dans roblox-verify"
                             )
+                            channel_changed = True
                         except:
                             pass
                 elif is_unverified_exception:
@@ -1505,6 +1562,7 @@ async def enforce_permissions():
                                 send_messages=True,
                                 reason="enforce_permissions : exception non-vérifié"
                             )
+                            channel_changed = True
                         except:
                             pass
                 else:
@@ -1517,6 +1575,7 @@ async def enforce_permissions():
                                 send_messages=False,
                                 reason="enforce_permissions : non-vérifié bloqué"
                             )
+                            channel_changed = True
                         except:
                             pass
 
@@ -1530,6 +1589,7 @@ async def enforce_permissions():
                             send_messages=False,
                             reason="enforce_permissions : raider bloqué"
                         )
+                        channel_changed = True
                     except:
                         pass
 
@@ -1542,6 +1602,7 @@ async def enforce_permissions():
                             send_messages=False,
                             reason="enforce_permissions : muted bloqué"
                         )
+                        channel_changed = True
                     except:
                         pass
 
@@ -1557,6 +1618,7 @@ async def enforce_permissions():
                                 send_messages=True,
                                 reason="enforce_permissions : roblox-lié autorisé dans vérification"
                             )
+                            channel_changed = True
                         except:
                             pass
                 else:
@@ -1569,10 +1631,37 @@ async def enforce_permissions():
                                 send_messages=False,
                                 reason="enforce_permissions : roblox-lié bloqué hors vérification"
                             )
+                            channel_changed = True
                         except:
                             pass
 
+            # Petite pause seulement si on a effectivement modifié ce salon, pour ménager les rate limits Discord
+            if channel_changed:
+                await asyncio.sleep(0.3)
+
         await asyncio.sleep(0.5)
+
+@tasks.loop(minutes=10)
+async def update_online_counter():
+    """
+    Renomme le salon vocal ONLINE_COUNTER_CHANNEL_ID avec le nombre de membres en ligne.
+    Nécessite l'intent 'presences' activé ici ET dans le Discord Developer Portal.
+    Intervalle de 10 minutes pour respecter la limite Discord de renommage des salons.
+    """
+    chan = bot.get_channel(ONLINE_COUNTER_CHANNEL_ID)
+    if not chan:
+        return
+    guild = chan.guild
+    online_count = sum(
+        1 for m in guild.members
+        if not m.bot and m.status != discord.Status.offline
+    )
+    new_name = f"🟢・En ligne : {online_count}"
+    if chan.name != new_name:
+        try:
+            await chan.edit(name=new_name, reason="Botixirya : mise à jour du compteur en ligne")
+        except Exception as e:
+            await send_log(f"⚠️ **Compteur en ligne** : impossible de renommer le salon — `{e}`")
 
 async def send_funds_error(msg: str):
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -1730,6 +1819,8 @@ async def on_ready():
     await load_roblox_links()
     await load_tempbans_from_discord()
     await load_tempmutes_from_discord()
+    await load_bans_from_discord()
+    await load_giveaways_from_discord()
 
     if not check_giveaways.is_running():
         check_giveaways.start()
@@ -1745,7 +1836,9 @@ async def on_ready():
         check_tempmutes.start()
     if not cleanup_oauth_states.is_running():
         cleanup_oauth_states.start()
-        
+    if not update_online_counter.is_running():
+        update_online_counter.start()
+
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
 @bot.event
@@ -1820,7 +1913,6 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.event
-@bot.event
 async def on_member_join(member):
     if member.bot:
         return
@@ -1875,7 +1967,7 @@ async def on_guild_role_delete(role):
 async def on_member_remove(member):
     if member.bot:
         return
-        await asyncio.sleep(0.5)
+    await asyncio.sleep(0.5)
     try:
         async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
             if (time.time() - entry.created_at.timestamp() < 5
@@ -1922,14 +2014,7 @@ async def on_message_delete(message):
     if message.author.bot or not message.guild:
         return
     # Ne pas logger les messages dans les salons mémoire du bot
-    memory_channels = {
-        DB_CHANNEL_ID, XP_MEMORY_CHANNEL_ID, DONATION_MEMORY_CHANNEL_ID,
-        TICKET_MEMORY_CHANNEL_ID, TABLE_LOG_CHANNEL_ID, ROBLOX_LINKS_CHANNEL_ID,
-        ROLE_BACKUP_CHANNEL_ID, TEMPBAN_LOG_CHANNEL_ID, TEMPMUTE_LOG_CHANNEL_ID,
-        MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
-        ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
-    }
-    if message.channel.id in memory_channels:
+    if message.channel.id in MEMORY_CHANNELS:
         return
 
     log_chan = bot.get_channel(MESSAGES_LOG_CHANNEL_ID)
@@ -1963,13 +2048,7 @@ async def on_message_edit(before, after):
     if before.content == after.content:
         return  # Changement d'embed uniquement, pas de contenu
 
-    memory_channels = {
-        DB_CHANNEL_ID, XP_MEMORY_CHANNEL_ID, DONATION_MEMORY_CHANNEL_ID,
-        TICKET_MEMORY_CHANNEL_ID, TABLE_LOG_CHANNEL_ID, ROBLOX_LINKS_CHANNEL_ID,
-        MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
-        ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
-    }
-    if before.channel.id in memory_channels:
+    if before.channel.id in MEMORY_CHANNELS:
         return
 
     log_chan = bot.get_channel(MESSAGES_LOG_CHANNEL_ID)
@@ -2280,21 +2359,35 @@ async def restore(ctx):
 async def giveaway(ctx, *, args):
     m = re.findall(r'\[(.*?)\]', args)
     if len(m) < 4:
-        return
-    end = time.time() + (int(m[0]) * 60)
+        return await ctx.send(
+            f"❌ Format incorrect. Usage :\n"
+            f"`{COMMAND_PREFIX}giveaway [minutes] [nb_gagnants] [prix] [condition]`"
+        )
+    try:
+        minutes = int(m[0])
+        winners_count = int(m[1])
+    except ValueError:
+        return await ctx.send("❌ `[minutes]` et `[nb_gagnants]` doivent être des nombres entiers.")
+
+    prize = m[2]
+    condition = m[3]
+    end = time.time() + (minutes * 60)
+
     embed = discord.Embed(title="🎉 GIVEAWAY", color=discord.Color.gold())
-    embed.add_field(name="Prix", value=m[2])
+    embed.add_field(name="Prix", value=prize, inline=False)
+    embed.add_field(name="Condition", value=condition, inline=False)
     msg = await ctx.send(embed=embed, view=GiveawayView(bot))
-    data = load_giveaway()
-    data[str(msg.id)] = {
+
+    giveaway_data[str(msg.id)] = {
         "channel_id": ctx.channel.id,
-        "prize": m[2],
-        "winners_count": int(m[1]),
+        "prize": prize,
+        "condition": condition,
+        "winners_count": winners_count,
         "end_time": end,
         "participants": [],
         "ended": False
     }
-    save_giveaway(data)
+    await save_giveaways_to_discord()
 
 # --- Modération ---
 
@@ -2342,16 +2435,15 @@ async def ban(ctx, user: discord.Member, duration: int, *, reason: str = "Aucune
     except Exception as e:
         return await ctx.send(f"❌ Erreur : {e}")
 
-    bans = load_bans()
     key = f"{ctx.guild.id}:{user.id}"
-    bans[key] = {
+    bans_data[key] = {
         "user_id": user.id,
         "guild_id": ctx.guild.id,
         "reason": reason,
         "end_time": end_time,
         "moderator": ctx.author.id
     }
-    save_bans(bans)
+    await save_bans_to_discord()
 
     duration_str = f"{duration} minute(s)" if duration > 0 else "permanent"
     log_chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
@@ -2425,16 +2517,14 @@ async def pardon(ctx, user: discord.User):
     except Exception as e:
         return await ctx.send(f"❌ Erreur : {e}")
 
-    bans = load_bans()
     key = f"{ctx.guild.id}:{user.id}"
-    if key in bans:
-        del bans[key]
-        save_bans(bans)
+    if key in bans_data:
+        del bans_data[key]
+        await save_bans_to_discord()
 
     # Retire aussi du tempban si présent
-    tkey = f"{ctx.guild.id}:{user.id}"
-    if tkey in tempban_data:
-        del tempban_data[tkey]
+    if key in tempban_data:
+        del tempban_data[key]
         await save_tempbans_to_discord()
 
     log_chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
@@ -2958,6 +3048,7 @@ class RPSView(discord.ui.View):
         self.challenger = challenger
         self.opponent = opponent
         self.picks = {}
+        self.message = None
 
         for emoji in self.CHOICES:
             btn = discord.ui.Button(label=self.CHOICES[emoji], emoji=emoji, style=discord.ButtonStyle.secondary)
@@ -2994,7 +3085,13 @@ class RPSView(discord.ui.View):
         return callback
 
     async def on_timeout(self):
-        pass
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except:
+                pass
 
 # ==========================================
 # COMMANDES FUN & UTILES (MEMBRES)
@@ -3012,7 +3109,9 @@ async def rps(ctx, opponent: discord.Member):
         ),
         color=discord.Color.blurple()
     )
-    await ctx.send(embed=embed, view=RPSView(ctx.author, opponent))
+    view = RPSView(ctx.author, opponent)
+    msg = await ctx.send(embed=embed, view=view)
+    view.message = msg
 
 @bot.command()
 async def roll(ctx, faces: int = 6):
@@ -3404,6 +3503,7 @@ class TicTacToeView(discord.ui.View):
         self.players = [player1, player2]
         self.turn = 0
         self.board = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+        self.message = None
         for r in range(3):
             for c in range(3):
                 self.add_item(TicTacToeButton(r, c))
@@ -3431,6 +3531,15 @@ class TicTacToeView(discord.ui.View):
     def is_draw(self):
         return all(self.board[r][c] != 0 for r in range(3) for c in range(3))
 
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except:
+                pass
+
 @bot.command()
 async def tictactoe(ctx, opponent: discord.Member):
     if opponent.bot or opponent == ctx.author:
@@ -3444,7 +3553,8 @@ async def tictactoe(ctx, opponent: discord.Member):
         ),
         color=discord.Color.blurple()
     )
-    await ctx.send(embed=embed, view=view)
+    msg = await ctx.send(embed=embed, view=view)
+    view.message = msg
 
 # ==========================================
 # VIEW — PENDU
