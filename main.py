@@ -52,6 +52,13 @@ INVITE_DATA_CHANNEL_ID = 1544421684201652314       # Mémoire principale (soldes
 ALREADY_INVITED_CHANNEL_ID = 1544426137164455967   # Liste permanente des ID déjà invités une fois (anti-farming)
 INVITE_REWARD_PER_INVITE = 10   # Robux crédités par invitation valide
 INVITE_CASHOUT_MINIMUM = 50     # Solde minimum requis pour pouvoir cash out
+INVITE_MIN_ACCOUNT_AGE_DAYS = 30  # Âge minimum du compte invité pour être crédité (anti-fraude)
+
+# --- Système de warns / big warns ---
+WARN_LOG_CHANNEL_ID = 1545832162748792972   # Logs + mémoire des warns/big warns
+WARN_SIMPLE_EXPIRY_DAYS = 30    # Un warn simple expire après ce délai s'il n'a jamais atteint 3
+BIGWARN_EXPIRY_DAYS = 90        # Un big warn expire après ce délai sans nouveau big warn
+WARNS_PER_BIGWARN = 3           # Nombre de warns simples consommés pour déclencher un big warn automatique
 
 # --- Messages de bienvenue du système d'invitations (un choisi au hasard à chaque arrivée) ---
 INVITE_WELCOME_CREDITED = [
@@ -169,6 +176,9 @@ recently_deleted_invites = {} # {guild_id: {code: {"inviter_id": int, "deleted_a
 invite_data = {}              # {"balances": {inviter_id: {"count","balance","total_earned"}}, "cashouts": {request_id: {...}}, "invited_by": {invited_id: inviter_id}}
 already_invited_ids = set()   # IDs (str) déjà comptés comme invités une fois — jamais retirés (anti leave/rejoin farming)
 
+# --- Système de warns / big warns ---
+warn_data = {}   # {"guild_id:user_id": {"warns": int, "last_warn_at": float, "big_warns": int, "last_bigwarn_at": float, "history": [...]}}
+
 # --- Commandes admin/modo à tracer automatiquement ---
 LOGGED_ADMIN_COMMANDS = {
     'kill', 'setcountchannel', 'setscore', 'lock', 'unlock', 'restore',
@@ -176,7 +186,8 @@ LOGGED_ADMIN_COMMANDS = {
     'tempmute', 'unmute', 'safe', 'removesafe', 'TicketCreatingChannel',
     'SetTableChannel', 'AddTableLine', 'SetTableValue', 'RemoveTableValue',
     'GetTableUserValue', 'RemoveTopBoardRobux', 'backup', 'COMMANDSON',
-    'setuprobloxverify', 'cashout', 'AdjustInviteBalance', 'ResetInviteFlag'
+    'setuprobloxverify', 'cashout', 'AdjustInviteBalance', 'ResetInviteFlag',
+    'warn', 'bigwarn', 'unwarn', 'unbigwarn'
 }
 
 # --- Salons "mémoire" du bot : jamais loggés dans messages-log (ni suppression, ni édition) ---
@@ -188,7 +199,7 @@ MEMORY_CHANNELS = {
     MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
     ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
     INVITE_ARRIVAL_CHANNEL_ID, INVITE_DEPART_CHANNEL_ID, INVITE_CASHOUT_CHANNEL_ID,
-    INVITE_DATA_CHANNEL_ID, ALREADY_INVITED_CHANNEL_ID,
+    INVITE_DATA_CHANNEL_ID, ALREADY_INVITED_CHANNEL_ID, WARN_LOG_CHANNEL_ID,
 }
 # ==========================================
 
@@ -699,6 +710,101 @@ async def find_inviter(guild):
     invite_cache[gid] = new_cache
 
     return inviter_id
+
+# ==========================================
+# SYSTÈME DE WARNS / BIG WARNS — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_warn_data():
+    await save_json_to_channel(WARN_LOG_CHANNEL_ID, "WARN_DATA|", warn_data, search_limit=200)
+
+async def load_warn_data():
+    global warn_data
+    warn_data = await load_json_from_channel(WARN_LOG_CHANNEL_ID, "WARN_DATA|", {}, search_limit=200)
+
+async def apply_bigwarn_sanction(member: discord.Member, big_warn_level: int, reason: str, moderator: discord.Member):
+    """
+    Applique la sanction correspondant au palier de big warn atteint (1, 2 ou 3),
+    en s'appuyant sur les systèmes de tempmute/tempban déjà existants du bot.
+    Retourne un texte descriptif de la sanction appliquée.
+    """
+    guild = member.guild
+    key = f"{guild.id}:{member.id}"
+
+    if big_warn_level == 1:
+        seconds = 1 * 86400
+        muted_role = guild.get_role(MUTED_ROLE_ID)
+        verified_role = guild.get_role(ROLE_VERIFIED_ID)
+        if muted_role:
+            try:
+                await member.add_roles(muted_role, reason=f"[Big Warn 1/3] {reason}")
+                if verified_role and verified_role in member.roles:
+                    await member.remove_roles(verified_role, reason=f"[Big Warn 1/3] {reason}")
+            except Exception:
+                pass
+        tempmute_data[key] = {
+            "user_id": member.id, "guild_id": guild.id, "end_time": time.time() + seconds,
+            "reason": f"Big Warn 1/3 : {reason}", "moderator_id": moderator.id, "username": str(member)
+        }
+        await save_tempmutes_to_discord()
+        return "🔇 Mute temporaire de **1 jour** appliqué (Big Warn 1/3)."
+
+    elif big_warn_level == 2:
+        seconds = 3 * 86400
+        muted_role = guild.get_role(MUTED_ROLE_ID)
+        verified_role = guild.get_role(ROLE_VERIFIED_ID)
+        if muted_role:
+            try:
+                await member.add_roles(muted_role, reason=f"[Big Warn 2/3] {reason}")
+                if verified_role and verified_role in member.roles:
+                    await member.remove_roles(verified_role, reason=f"[Big Warn 2/3] {reason}")
+            except Exception:
+                pass
+        tempmute_data[key] = {
+            "user_id": member.id, "guild_id": guild.id, "end_time": time.time() + seconds,
+            "reason": f"Big Warn 2/3 : {reason}", "moderator_id": moderator.id, "username": str(member)
+        }
+        await save_tempmutes_to_discord()
+        return "🔇 Mute temporaire de **3 jours** appliqué (Big Warn 2/3)."
+
+    elif big_warn_level >= 3:
+        seconds = 31 * 86400
+        try:
+            await member.ban(reason=f"[Big Warn 3/3] {reason}")
+        except Exception as e:
+            return f"⚠️ Big Warn 3/3 atteint mais le ban a échoué : {e}"
+
+        tempban_data[key] = {
+            "user_id": member.id, "guild_id": guild.id, "end_time": time.time() + seconds,
+            "reason": f"Big Warn 3/3 : {reason}", "moderator_id": moderator.id, "username": str(member)
+        }
+        await save_tempbans_to_discord()
+
+        # Reset complet du cycle pour cet utilisateur — le cycle repart de zéro une fois qu'il revient
+        entry = warn_data.get(key)
+        if entry:
+            entry["warns"] = 0
+            entry["big_warns"] = 0
+            await save_warn_data()
+
+        return "🔨 **Ban temporaire de 31 jours** appliqué (Big Warn 3/3). Le cycle de warns a été réinitialisé."
+
+    return None
+
+@tasks.loop(hours=1)
+async def check_warn_expiry():
+    """Fait expirer les warns simples (30j sans avoir atteint 3) et les big warns (90j sans nouveau big warn)."""
+    now = time.time()
+    changed = False
+    for key, entry in list(warn_data.items()):
+        if entry.get("warns", 0) > 0 and now - entry.get("last_warn_at", 0) > WARN_SIMPLE_EXPIRY_DAYS * 86400:
+            entry["warns"] = 0
+            changed = True
+        if 0 < entry.get("big_warns", 0) < 3 and now - entry.get("last_bigwarn_at", 0) > BIGWARN_EXPIRY_DAYS * 86400:
+            entry["big_warns"] = 0
+            changed = True
+    if changed:
+        await save_warn_data()
 
 # ==========================================
 # TEMPBAN — PERSISTANCE DISCORD
@@ -2071,6 +2177,9 @@ async def on_ready():
         if record.get("status") == "pending":
             bot.add_view(ConfirmPaymentView(request_id))
 
+    # --- Système de warns / big warns ---
+    await load_warn_data()
+
     if not check_giveaways.is_running():
         check_giveaways.start()
     if not check_bans.is_running():
@@ -2087,6 +2196,8 @@ async def on_ready():
         cleanup_oauth_states.start()
     if not update_online_counter.is_running():
         update_online_counter.start()
+    if not check_warn_expiry.is_running():
+        check_warn_expiry.start()
 
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
@@ -2213,13 +2324,15 @@ async def on_member_join(member):
     invited_str = str(member.id)
     already_seen = invited_str in already_invited_ids
     inviter_id = await find_inviter(member.guild)
+    account_age_days = (discord.utils.utcnow() - member.created_at).days
+    account_too_young = account_age_days < INVITE_MIN_ACCOUNT_AGE_DAYS
 
     if inviter_id:
         invite_data.setdefault("invited_by", {})[invited_str] = inviter_id
 
     arrival_chan = bot.get_channel(INVITE_ARRIVAL_CHANNEL_ID)
 
-    if inviter_id and not already_seen:
+    if inviter_id and not already_seen and not account_too_young:
         balances = invite_data.setdefault("balances", {})
         entry = balances.get(str(inviter_id), {"count": 0, "balance": 0, "total_earned": 0})
         entry["count"] = entry.get("count", 0) + 1
@@ -2232,6 +2345,18 @@ async def on_member_join(member):
 
         if arrival_chan:
             msg = random.choice(INVITE_WELCOME_CREDITED).format(invited=member.mention, inviter=f"<@{inviter_id}>")
+            await arrival_chan.send(msg)
+    elif inviter_id and not already_seen and account_too_young:
+        # Compte trop récent : invitation non créditée cette fois, mais pas bloquée définitivement —
+        # si la personne revient plus tard une fois son compte assez ancien, l'invitation pourra compter.
+        await save_invite_data()
+        await send_log(
+            f"🚫 **Invitation non créditée** : {member.mention} (`{member.id}`) a un compte de "
+            f"{account_age_days} jour(s) (minimum {INVITE_MIN_ACCOUNT_AGE_DAYS}j requis). "
+            f"Inviteur potentiel : <@{inviter_id}>."
+        )
+        if arrival_chan:
+            msg = random.choice(INVITE_WELCOME_UNKNOWN).format(invited=member.mention)
             await arrival_chan.send(msg)
     elif inviter_id and already_seen:
         await save_invite_data()  # on garde le mapping invited_by à jour même sans rémunération
@@ -2570,6 +2695,14 @@ async def help(ctx):
             f"**{COMMAND_PREFIX}tempmute @user [durée] [raison]** : Mute temporaire.\n"
             f"  └ Durée : `10m` = 10 min · `2h` = 2 heures · `7d` = 7 jours\n"
             f"**{COMMAND_PREFIX}unmute @user** : Unmute."
+        ), inline=False)
+        embed.add_field(name="⚠️ Warns", value=(
+            f"**{COMMAND_PREFIX}warn @user [raison]** : Avertissement simple ({WARNS_PER_BIGWARN} = 1 big warn auto).\n"
+            f"**{COMMAND_PREFIX}bigwarn @user [raison]** : Big warn direct (nécessite Ban Members).\n"
+            f"**{COMMAND_PREFIX}warnings @user** : Voir l'historique des warns d'un membre.\n"
+            f"**{COMMAND_PREFIX}unwarn @user** : Retire le dernier warn simple.\n"
+            f"**{COMMAND_PREFIX}unbigwarn @user** : Retire le dernier big warn (ne défait pas la sanction).\n"
+            f"  └ Big Warn 1 = mute 1j · Big Warn 2 = mute 3j · Big Warn 3 = ban 31j + reset du cycle."
         ), inline=False)
 
     if is_owner:
@@ -3509,6 +3642,157 @@ async def ResetInviteFlag(ctx, user: discord.Member):
         )
     else:
         await ctx.send(f"ℹ️ {user.mention} n'était pas dans la liste des membres déjà invités.")
+
+# ==========================================
+# COMMANDES — SYSTÈME DE WARNS / BIG WARNS
+# ==========================================
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def warn(ctx, user: discord.Member, *, reason: str = "Aucune raison fournie"):
+    key = f"{ctx.guild.id}:{user.id}"
+    entry = warn_data.get(key, {"warns": 0, "last_warn_at": 0, "big_warns": 0, "last_bigwarn_at": 0, "history": []})
+
+    now = time.time()
+    now_str = discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M UTC")
+    entry["warns"] = entry.get("warns", 0) + 1
+    entry["last_warn_at"] = now
+    entry.setdefault("history", []).append({
+        "type": "warn", "reason": reason, "moderator_id": ctx.author.id, "at": now_str
+    })
+
+    escalated = False
+    sanction_text = None
+    if entry["warns"] >= WARNS_PER_BIGWARN:
+        entry["warns"] -= WARNS_PER_BIGWARN
+        entry["big_warns"] = entry.get("big_warns", 0) + 1
+        entry["last_bigwarn_at"] = now
+        entry["history"].append({
+            "type": "bigwarn", "reason": f"Escalade automatique (3 warns) — {reason}",
+            "moderator_id": ctx.author.id, "at": now_str
+        })
+        escalated = True
+
+    warn_data[key] = entry
+    await save_warn_data()
+
+    if escalated:
+        sanction_text = await apply_bigwarn_sanction(user, entry["big_warns"], reason, ctx.author)
+
+    log_chan = bot.get_channel(WARN_LOG_CHANNEL_ID)
+    if log_chan:
+        embed = discord.Embed(title="⚠️ Warn", color=discord.Color.orange() if escalated else discord.Color.yellow())
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Utilisateur",   value=f"{user.mention} (`{user.id}`)", inline=True)
+        embed.add_field(name="Modérateur",    value=ctx.author.mention,              inline=True)
+        embed.add_field(name="Warns simples", value=f"{entry['warns']}/{WARNS_PER_BIGWARN}", inline=True)
+        embed.add_field(name="Big warns",     value=f"{entry.get('big_warns', 0)}/3",        inline=True)
+        embed.add_field(name="Raison",        value=reason,                          inline=False)
+        if escalated:
+            embed.add_field(
+                name="⚠️ Escalade automatique",
+                value=f"3 warns atteints → Big Warn déclenché.\n{sanction_text or ''}",
+                inline=False
+            )
+        await log_chan.send(embed=embed)
+
+    if escalated:
+        await ctx.send(f"⚠️ {user.mention} a atteint 3 warns → **Big Warn automatique** déclenché.\n{sanction_text}")
+    else:
+        await ctx.send(f"⚠️ {user.mention} averti ({entry['warns']}/{WARNS_PER_BIGWARN} avant big warn). Raison : {reason}")
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def bigwarn(ctx, user: discord.Member, *, reason: str = "Aucune raison fournie"):
+    key = f"{ctx.guild.id}:{user.id}"
+    entry = warn_data.get(key, {"warns": 0, "last_warn_at": 0, "big_warns": 0, "last_bigwarn_at": 0, "history": []})
+
+    now = time.time()
+    entry["big_warns"] = entry.get("big_warns", 0) + 1
+    entry["last_bigwarn_at"] = now
+    entry.setdefault("history", []).append({
+        "type": "bigwarn", "reason": reason, "moderator_id": ctx.author.id,
+        "at": discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M UTC")
+    })
+
+    warn_data[key] = entry
+    await save_warn_data()
+
+    sanction_text = await apply_bigwarn_sanction(user, entry["big_warns"], reason, ctx.author)
+
+    log_chan = bot.get_channel(WARN_LOG_CHANNEL_ID)
+    if log_chan:
+        embed = discord.Embed(title="🚨 Big Warn (direct)", color=discord.Color.dark_orange())
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{user.mention} (`{user.id}`)", inline=True)
+        embed.add_field(name="Modérateur",  value=ctx.author.mention,              inline=True)
+        embed.add_field(name="Big warns",   value=f"{entry['big_warns']}/3",       inline=True)
+        embed.add_field(name="Raison",      value=reason,                          inline=False)
+        embed.add_field(name="Sanction",    value=sanction_text or "—",            inline=False)
+        await log_chan.send(embed=embed)
+
+    await ctx.send(f"🚨 Big Warn direct appliqué à {user.mention} ({entry['big_warns']}/3).\n{sanction_text}")
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def warnings(ctx, user: discord.Member):
+    key = f"{ctx.guild.id}:{user.id}"
+    entry = warn_data.get(key, {"warns": 0, "big_warns": 0, "history": []})
+
+    embed = discord.Embed(title=f"⚠️ Historique de {user.display_name}", color=discord.Color.orange())
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(name="Warns simples", value=f"{entry.get('warns', 0)}/{WARNS_PER_BIGWARN}", inline=True)
+    embed.add_field(name="Big warns",     value=f"{entry.get('big_warns', 0)}/3",               inline=True)
+
+    history = entry.get("history", [])[-10:]
+    if history:
+        lines = []
+        for h in reversed(history):
+            tag = "🚨 Big Warn" if h["type"] == "bigwarn" else "⚠️ Warn"
+            lines.append(f"{tag} — {h['at']} par <@{h['moderator_id']}>\n> {h['reason']}")
+        embed.add_field(name="Historique récent (10 derniers)", value="\n\n".join(lines)[:1024], inline=False)
+    else:
+        embed.add_field(name="Historique", value="Aucun warn enregistré.", inline=False)
+
+    await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def unwarn(ctx, user: discord.Member):
+    key = f"{ctx.guild.id}:{user.id}"
+    entry = warn_data.get(key)
+    if not entry or entry.get("warns", 0) <= 0:
+        return await ctx.send(f"ℹ️ {user.mention} n'a aucun warn simple à retirer.")
+
+    entry["warns"] -= 1
+    history = entry.get("history", [])
+    for i in range(len(history) - 1, -1, -1):
+        if history[i]["type"] == "warn":
+            history.pop(i)
+            break
+    await save_warn_data()
+    await ctx.send(f"✅ Un warn simple retiré à {user.mention}. Nouveau total : {entry['warns']}/{WARNS_PER_BIGWARN}.")
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def unbigwarn(ctx, user: discord.Member):
+    key = f"{ctx.guild.id}:{user.id}"
+    entry = warn_data.get(key)
+    if not entry or entry.get("big_warns", 0) <= 0:
+        return await ctx.send(f"ℹ️ {user.mention} n'a aucun big warn à retirer.")
+
+    entry["big_warns"] -= 1
+    history = entry.get("history", [])
+    for i in range(len(history) - 1, -1, -1):
+        if history[i]["type"] == "bigwarn":
+            history.pop(i)
+            break
+    await save_warn_data()
+    await ctx.send(
+        f"✅ Un big warn retiré à {user.mention}. Nouveau total : {entry['big_warns']}/3.\n"
+        f"⚠️ La sanction déjà appliquée (mute/ban) n'est pas annulée automatiquement — utilise "
+        f"`{COMMAND_PREFIX}unmute` ou `{COMMAND_PREFIX}pardon` si besoin."
+    )
 
 # ==========================================
 # VIEW — PIERRE FEUILLE CISEAUX
