@@ -362,7 +362,7 @@ async def save_roblox_links():
         return
     payload = json.dumps(roblox_links, ensure_ascii=False)
     async for msg in chan.history(limit=20):
-        if msg.content.startswith("ROBLOX_LINKS|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("ROBLOX_LINKS|"):
             try:
                 await msg.delete()
             except:
@@ -376,7 +376,7 @@ async def load_roblox_links():
     if not chan:
         return
     async for msg in chan.history(limit=20):
-        if msg.content.startswith("ROBLOX_LINKS|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("ROBLOX_LINKS|"):
             try:
                 roblox_links = json.loads(msg.content[len("ROBLOX_LINKS|"):])
             except:
@@ -504,7 +504,7 @@ async def save_bans_to_discord():
         return
     payload = json.dumps(bans_data, ensure_ascii=False)
     async for msg in chan.history(limit=200):
-        if msg.content.startswith("BANS_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("BANS_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -518,7 +518,7 @@ async def load_bans_from_discord():
     if not chan:
         return
     async for msg in chan.history(limit=200):
-        if msg.content.startswith("BANS_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("BANS_SAVE|"):
             try:
                 bans_data = json.loads(msg.content[len("BANS_SAVE|"):])
             except:
@@ -535,7 +535,7 @@ async def save_giveaways_to_discord():
         return
     payload = json.dumps(giveaway_data, ensure_ascii=False)
     async for msg in chan.history(limit=100):
-        if msg.content.startswith("GIVEAWAY_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("GIVEAWAY_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -549,7 +549,7 @@ async def load_giveaways_from_discord():
     if not chan:
         return
     async for msg in chan.history(limit=100):
-        if msg.content.startswith("GIVEAWAY_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("GIVEAWAY_SAVE|"):
             try:
                 giveaway_data = json.loads(msg.content[len("GIVEAWAY_SAVE|"):])
             except:
@@ -570,7 +570,7 @@ async def save_json_to_channel(channel_id: int, marker: str, data, search_limit:
     payload = json.dumps(data, ensure_ascii=False)
 
     async for msg in chan.history(limit=search_limit):
-        if msg.content == marker or msg.content.startswith(marker):
+        if msg.author.id == bot.user.id and (msg.content == marker or msg.content.startswith(marker)):
             try:
                 await msg.delete()
             except:
@@ -588,13 +588,13 @@ async def load_json_from_channel(channel_id: int, marker: str, default, search_l
     if not chan:
         return default
     async for msg in chan.history(limit=search_limit):
-        if msg.content == marker and msg.attachments:
+        if msg.author.id == bot.user.id and msg.content == marker and msg.attachments:
             try:
                 raw = await msg.attachments[0].read()
                 return json.loads(raw.decode("utf-8"))
             except:
                 return default
-        if msg.content.startswith(marker):
+        if msg.author.id == bot.user.id and msg.content.startswith(marker):
             try:
                 return json.loads(msg.content[len(marker):])
             except:
@@ -816,7 +816,7 @@ async def save_tempbans_to_discord():
         return
     payload = json.dumps(tempban_data, ensure_ascii=False)
     async for msg in chan.history(limit=100):
-        if msg.content.startswith("TEMPBAN_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TEMPBAN_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -830,7 +830,7 @@ async def load_tempbans_from_discord():
     if not chan:
         return
     async for msg in chan.history(limit=100):
-        if msg.content.startswith("TEMPBAN_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TEMPBAN_SAVE|"):
             try:
                 tempban_data = json.loads(msg.content[len("TEMPBAN_SAVE|"):])
             except:
@@ -847,7 +847,7 @@ async def save_tempmutes_to_discord():
         return
     payload = json.dumps(tempmute_data, ensure_ascii=False)
     async for msg in chan.history(limit=100):
-        if msg.content.startswith("TEMPMUTE_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TEMPMUTE_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -861,7 +861,7 @@ async def load_tempmutes_from_discord():
     if not chan:
         return
     async for msg in chan.history(limit=100):
-        if msg.content.startswith("TEMPMUTE_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TEMPMUTE_SAVE|"):
             try:
                 tempmute_data = json.loads(msg.content[len("TEMPMUTE_SAVE|"):])
             except:
@@ -877,7 +877,7 @@ async def save_ticket_config(config: dict):
     if not mem_chan:
         return
     async for msg in mem_chan.history(limit=200):
-        if msg.content.startswith("TICKET_CONFIG|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TICKET_CONFIG|"):
             try:
                 old = json.loads(msg.content[len("TICKET_CONFIG|"):])
                 if old.get("ticket_id") == config["ticket_id"]:
@@ -893,7 +893,7 @@ async def load_ticket_configs():
     if not mem_chan:
         return
     async for msg in mem_chan.history(limit=200):
-        if msg.content.startswith("TICKET_CONFIG|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TICKET_CONFIG|"):
             try:
                 config = json.loads(msg.content[len("TICKET_CONFIG|"):])
                 tid = config["ticket_id"]
@@ -915,7 +915,7 @@ async def save_table_to_log():
         "data": table_data
     }
     async for msg in log_chan.history(limit=50):
-        if msg.content.startswith("TABLE_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TABLE_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -929,7 +929,7 @@ async def load_table_from_log():
     if not log_chan:
         return
     async for msg in log_chan.history(limit=50):
-        if msg.content.startswith("TABLE_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("TABLE_SAVE|"):
             try:
                 payload = json.loads(msg.content[len("TABLE_SAVE|"):])
                 table_channel_id = payload.get("table_channel_id")
@@ -992,7 +992,7 @@ async def save_xp_to_discord():
         return
     payload = json.dumps(xp_data, ensure_ascii=False)
     async for msg in chan.history(limit=20):
-        if msg.content.startswith("XP_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("XP_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -1010,7 +1010,7 @@ async def load_xp_from_discord():
     if not chan:
         return
     async for msg in chan.history(limit=20):
-        if msg.content.startswith("XP_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("XP_SAVE|"):
             try:
                 xp_data = json.loads(msg.content[len("XP_SAVE|"):])
             except:
@@ -1090,7 +1090,7 @@ async def save_donations_to_discord():
         return
     payload = json.dumps(donations_data, ensure_ascii=False)
     async for msg in chan.history(limit=20):
-        if msg.content.startswith("DONATION_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("DONATION_SAVE|"):
             try:
                 await msg.delete()
             except:
@@ -1104,7 +1104,7 @@ async def load_donations_from_discord():
     if not chan:
         return
     async for msg in chan.history(limit=20):
-        if msg.content.startswith("DONATION_SAVE|"):
+        if msg.author.id == bot.user.id and msg.content.startswith("DONATION_SAVE|"):
             try:
                 donations_data = json.loads(msg.content[len("DONATION_SAVE|"):])
             except:
@@ -2133,7 +2133,7 @@ async def on_ready():
     role_backup_chan = bot.get_channel(ROLE_BACKUP_CHANNEL_ID)
     if role_backup_chan:
         async for msg in role_backup_chan.history(limit=200):
-            if msg.content.startswith("ROLE_BACKUP|"):
+            if msg.author.id == bot.user.id and msg.content.startswith("ROLE_BACKUP|"):
                 parts = msg.content.split("|")
                 if len(parts) >= 3:
                     try:
