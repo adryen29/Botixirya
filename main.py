@@ -55,7 +55,8 @@ INVITE_CASHOUT_MINIMUM = 50     # Solde minimum requis pour pouvoir cash out
 INVITE_MIN_ACCOUNT_AGE_DAYS = 30  # Âge minimum du compte invité pour être crédité (anti-fraude)
 
 # --- Système de warns / big warns ---
-WARN_LOG_CHANNEL_ID = 1545832162748792972   # Logs + mémoire des warns/big warns
+WARN_LOG_CHANNEL_ID = 1545832162748792972   # Sauvegarde JSON pure des warns/big warns (ne pas lire à l'œil)
+WARN_DISPLAY_CHANNEL_ID = 1545840009150464151   # Embeds lisibles des warns/big warns (pour consultation humaine)
 WARN_SIMPLE_EXPIRY_DAYS = 30    # Un warn simple expire après ce délai s'il n'a jamais atteint 3
 BIGWARN_EXPIRY_DAYS = 90        # Un big warn expire après ce délai sans nouveau big warn
 WARNS_PER_BIGWARN = 3           # Nombre de warns simples consommés pour déclencher un big warn automatique
@@ -199,7 +200,7 @@ MEMORY_CHANNELS = {
     MESSAGES_LOG_CHANNEL_ID, MEMBER_LOG_CHANNEL_ID,
     ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
     INVITE_ARRIVAL_CHANNEL_ID, INVITE_DEPART_CHANNEL_ID, INVITE_CASHOUT_CHANNEL_ID,
-    INVITE_DATA_CHANNEL_ID, ALREADY_INVITED_CHANNEL_ID, WARN_LOG_CHANNEL_ID,
+    INVITE_DATA_CHANNEL_ID, ALREADY_INVITED_CHANNEL_ID, WARN_LOG_CHANNEL_ID, WARN_DISPLAY_CHANNEL_ID,
 }
 # ==========================================
 
@@ -3679,7 +3680,7 @@ async def warn(ctx, user: discord.Member, *, reason: str = "Aucune raison fourni
     if escalated:
         sanction_text = await apply_bigwarn_sanction(user, entry["big_warns"], reason, ctx.author)
 
-    log_chan = bot.get_channel(WARN_LOG_CHANNEL_ID)
+    log_chan = bot.get_channel(WARN_DISPLAY_CHANNEL_ID)
     if log_chan:
         embed = discord.Embed(title="⚠️ Warn", color=discord.Color.orange() if escalated else discord.Color.yellow())
         embed.set_thumbnail(url=user.display_avatar.url)
@@ -3720,7 +3721,7 @@ async def bigwarn(ctx, user: discord.Member, *, reason: str = "Aucune raison fou
 
     sanction_text = await apply_bigwarn_sanction(user, entry["big_warns"], reason, ctx.author)
 
-    log_chan = bot.get_channel(WARN_LOG_CHANNEL_ID)
+    log_chan = bot.get_channel(WARN_DISPLAY_CHANNEL_ID)
     if log_chan:
         embed = discord.Embed(title="🚨 Big Warn (direct)", color=discord.Color.dark_orange())
         embed.set_thumbnail(url=user.display_avatar.url)
