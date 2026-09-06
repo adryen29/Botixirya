@@ -374,31 +374,11 @@ def roblox_callback():
 
 
 async def save_roblox_links():
-    chan = bot.get_channel(ROBLOX_LINKS_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(roblox_links, ensure_ascii=False)
-    async for msg in chan.history(limit=20):
-        if msg.author.id == bot.user.id and msg.content.startswith("ROBLOX_LINKS|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"ROBLOX_LINKS|{payload}")
+    await save_json_to_channel(ROBLOX_LINKS_CHANNEL_ID, "ROBLOX_LINKS|", roblox_links, search_limit=50)
 
 async def load_roblox_links():
     global roblox_links
-    chan = bot.get_channel(ROBLOX_LINKS_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=20):
-        if msg.author.id == bot.user.id and msg.content.startswith("ROBLOX_LINKS|"):
-            try:
-                roblox_links = json.loads(msg.content[len("ROBLOX_LINKS|"):])
-            except:
-                roblox_links = {}
-            break
+    roblox_links = await load_json_from_channel(ROBLOX_LINKS_CHANNEL_ID, "ROBLOX_LINKS|", {}, search_limit=50)
 
 
 async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_username: str):
@@ -516,62 +496,22 @@ async def send_log(content):
 # ==========================================
 
 async def save_bans_to_discord():
-    chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(bans_data, ensure_ascii=False)
-    async for msg in chan.history(limit=200):
-        if msg.author.id == bot.user.id and msg.content.startswith("BANS_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"BANS_SAVE|{payload}")
+    await save_json_to_channel(BAN_LOG_CHANNEL_ID, "BANS_SAVE|", bans_data, search_limit=200)
 
 async def load_bans_from_discord():
     global bans_data
-    chan = bot.get_channel(BAN_LOG_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=200):
-        if msg.author.id == bot.user.id and msg.content.startswith("BANS_SAVE|"):
-            try:
-                bans_data = json.loads(msg.content[len("BANS_SAVE|"):])
-            except:
-                bans_data = {}
-            break
+    bans_data = await load_json_from_channel(BAN_LOG_CHANNEL_ID, "BANS_SAVE|", {}, search_limit=200)
 
 # ==========================================
 # GIVEAWAY — PERSISTANCE DISCORD
 # ==========================================
 
 async def save_giveaways_to_discord():
-    chan = bot.get_channel(GIVEAWAY_MEMORY_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(giveaway_data, ensure_ascii=False)
-    async for msg in chan.history(limit=100):
-        if msg.author.id == bot.user.id and msg.content.startswith("GIVEAWAY_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"GIVEAWAY_SAVE|{payload}")
+    await save_json_to_channel(GIVEAWAY_MEMORY_CHANNEL_ID, "GIVEAWAY_SAVE|", giveaway_data, search_limit=100)
 
 async def load_giveaways_from_discord():
     global giveaway_data
-    chan = bot.get_channel(GIVEAWAY_MEMORY_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=100):
-        if msg.author.id == bot.user.id and msg.content.startswith("GIVEAWAY_SAVE|"):
-            try:
-                giveaway_data = json.loads(msg.content[len("GIVEAWAY_SAVE|"):])
-            except:
-                giveaway_data = {}
-            break
+    giveaway_data = await load_json_from_channel(GIVEAWAY_MEMORY_CHANNEL_ID, "GIVEAWAY_SAVE|", {}, search_limit=100)
 
 # ==========================================
 # HELPERS GÉNÉRIQUES — PERSISTANCE DISCORD (payload potentiellement volumineux)
@@ -828,62 +768,22 @@ async def check_warn_expiry():
 # ==========================================
 
 async def save_tempbans_to_discord():
-    chan = bot.get_channel(TEMPBAN_LOG_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(tempban_data, ensure_ascii=False)
-    async for msg in chan.history(limit=100):
-        if msg.author.id == bot.user.id and msg.content.startswith("TEMPBAN_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"TEMPBAN_SAVE|{payload}")
+    await save_json_to_channel(TEMPBAN_LOG_CHANNEL_ID, "TEMPBAN_SAVE|", tempban_data, search_limit=100)
 
 async def load_tempbans_from_discord():
     global tempban_data
-    chan = bot.get_channel(TEMPBAN_LOG_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=100):
-        if msg.author.id == bot.user.id and msg.content.startswith("TEMPBAN_SAVE|"):
-            try:
-                tempban_data = json.loads(msg.content[len("TEMPBAN_SAVE|"):])
-            except:
-                tempban_data = {}
-            break
+    tempban_data = await load_json_from_channel(TEMPBAN_LOG_CHANNEL_ID, "TEMPBAN_SAVE|", {}, search_limit=100)
 
 # ==========================================
 # TEMPMUTE — PERSISTANCE DISCORD
 # ==========================================
 
 async def save_tempmutes_to_discord():
-    chan = bot.get_channel(TEMPMUTE_LOG_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(tempmute_data, ensure_ascii=False)
-    async for msg in chan.history(limit=100):
-        if msg.author.id == bot.user.id and msg.content.startswith("TEMPMUTE_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"TEMPMUTE_SAVE|{payload}")
+    await save_json_to_channel(TEMPMUTE_LOG_CHANNEL_ID, "TEMPMUTE_SAVE|", tempmute_data, search_limit=100)
 
 async def load_tempmutes_from_discord():
     global tempmute_data
-    chan = bot.get_channel(TEMPMUTE_LOG_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=100):
-        if msg.author.id == bot.user.id and msg.content.startswith("TEMPMUTE_SAVE|"):
-            try:
-                tempmute_data = json.loads(msg.content[len("TEMPMUTE_SAVE|"):])
-            except:
-                tempmute_data = {}
-            break
+    tempmute_data = await load_json_from_channel(TEMPMUTE_LOG_CHANNEL_ID, "TEMPMUTE_SAVE|", {}, search_limit=100)
 
 # ==========================================
 # SYSTÈME DE TICKETS — MÉMOIRE
@@ -894,15 +794,33 @@ async def save_ticket_config(config: dict):
     if not mem_chan:
         return
     async for msg in mem_chan.history(limit=200):
-        if msg.author.id == bot.user.id and msg.content.startswith("TICKET_CONFIG|"):
+        if msg.author.id != bot.user.id:
+            continue
+        old = None
+        if msg.content.startswith("TICKET_CONFIG|"):
             try:
                 old = json.loads(msg.content[len("TICKET_CONFIG|"):])
-                if old.get("ticket_id") == config["ticket_id"]:
-                    await msg.delete()
-                    break
             except:
                 pass
-    await mem_chan.send(f"TICKET_CONFIG|{json.dumps(config, ensure_ascii=False)}")
+        elif msg.content == "TICKET_CONFIG_FILE|" and msg.attachments:
+            try:
+                raw = await msg.attachments[0].read()
+                old = json.loads(raw.decode("utf-8"))
+            except:
+                pass
+        if old and old.get("ticket_id") == config["ticket_id"]:
+            try:
+                await msg.delete()
+            except:
+                pass
+            break
+
+    payload = json.dumps(config, ensure_ascii=False)
+    if len(payload) <= 1900:
+        await mem_chan.send(f"TICKET_CONFIG|{payload}")
+    else:
+        file = discord.File(fp=io.BytesIO(payload.encode("utf-8")), filename="ticket_config.json")
+        await mem_chan.send(content="TICKET_CONFIG_FILE|", file=file)
 
 async def load_ticket_configs():
     global ticket_configs
@@ -910,51 +828,42 @@ async def load_ticket_configs():
     if not mem_chan:
         return
     async for msg in mem_chan.history(limit=200):
-        if msg.author.id == bot.user.id and msg.content.startswith("TICKET_CONFIG|"):
+        if msg.author.id != bot.user.id:
+            continue
+        config = None
+        if msg.content.startswith("TICKET_CONFIG|"):
             try:
                 config = json.loads(msg.content[len("TICKET_CONFIG|"):])
-                tid = config["ticket_id"]
-                ticket_configs[tid] = config
             except:
                 pass
+        elif msg.content == "TICKET_CONFIG_FILE|" and msg.attachments:
+            try:
+                raw = await msg.attachments[0].read()
+                config = json.loads(raw.decode("utf-8"))
+            except:
+                pass
+        if config:
+            ticket_configs[config["ticket_id"]] = config
 
 # ==========================================
 # SYSTÈME DE TABLEAU DE RÉMUNÉRATION
 # ==========================================
 
 async def save_table_to_log():
-    log_chan = bot.get_channel(TABLE_LOG_CHANNEL_ID)
-    if not log_chan:
-        return
     payload = {
         "table_channel_id": table_channel_id,
         "table_message_id": table_message_id,
         "data": table_data
     }
-    async for msg in log_chan.history(limit=50):
-        if msg.author.id == bot.user.id and msg.content.startswith("TABLE_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await log_chan.send(f"TABLE_SAVE|{json.dumps(payload, ensure_ascii=False)}")
+    await save_json_to_channel(TABLE_LOG_CHANNEL_ID, "TABLE_SAVE|", payload, search_limit=50)
 
 async def load_table_from_log():
     global table_data, table_channel_id, table_message_id
-    log_chan = bot.get_channel(TABLE_LOG_CHANNEL_ID)
-    if not log_chan:
-        return
-    async for msg in log_chan.history(limit=50):
-        if msg.author.id == bot.user.id and msg.content.startswith("TABLE_SAVE|"):
-            try:
-                payload = json.loads(msg.content[len("TABLE_SAVE|"):])
-                table_channel_id = payload.get("table_channel_id")
-                table_message_id = payload.get("table_message_id")
-                table_data = payload.get("data", {})
-            except:
-                pass
-            break
+    payload = await load_json_from_channel(TABLE_LOG_CHANNEL_ID, "TABLE_SAVE|", None, search_limit=50)
+    if payload:
+        table_channel_id = payload.get("table_channel_id")
+        table_message_id = payload.get("table_message_id")
+        table_data = payload.get("data", {})
 
 def render_table(guild) -> str:
     if not table_data:
@@ -1004,18 +913,7 @@ def save_xp():
     pass
 
 async def save_xp_to_discord():
-    chan = bot.get_channel(XP_MEMORY_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(xp_data, ensure_ascii=False)
-    async for msg in chan.history(limit=20):
-        if msg.author.id == bot.user.id and msg.content.startswith("XP_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"XP_SAVE|{payload}")
+    await save_json_to_channel(XP_MEMORY_CHANNEL_ID, "XP_SAVE|", xp_data, search_limit=50)
 
 def load_xp():
     global xp_data
@@ -1023,16 +921,7 @@ def load_xp():
 
 async def load_xp_from_discord():
     global xp_data
-    chan = bot.get_channel(XP_MEMORY_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=20):
-        if msg.author.id == bot.user.id and msg.content.startswith("XP_SAVE|"):
-            try:
-                xp_data = json.loads(msg.content[len("XP_SAVE|"):])
-            except:
-                xp_data = {}
-            break
+    xp_data = await load_json_from_channel(XP_MEMORY_CHANNEL_ID, "XP_SAVE|", {}, search_limit=50)
 
 def get_level(xp: int) -> int:
     return int(math.sqrt(xp / 100))
@@ -1070,6 +959,36 @@ async def check_level_up(guild, member, old_level: int, new_level: int):
                     f"et obtient le rôle {role.mention} !"
                 )
 
+async def check_invite_role_up(guild, inviter_id: int, old_count: int, new_count: int):
+    if new_count <= old_count:
+        return
+
+    member = guild.get_member(inviter_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(inviter_id)
+        except:
+            return
+
+    awarded = []
+    for threshold, role_id in INVITE_LEVEL_ROLES.items():
+        if old_count < threshold <= new_count:
+            role = guild.get_role(role_id)
+            if role and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason=f"{threshold} invitations atteintes")
+                    awarded.append((threshold, role))
+                except:
+                    pass
+
+    if awarded:
+        chan = bot.get_channel(INVITE_ARRIVAL_CHANNEL_ID)
+        if chan:
+            for threshold, role in awarded:
+                await chan.send(
+                    f"🏆 {member.mention} a atteint **{threshold} invitations** et obtient le rôle {role.mention} !"
+                )
+
 async def refresh_table_message(guild):
     global table_message_id
     if not table_channel_id:
@@ -1102,31 +1021,11 @@ async def refresh_table_message(guild):
 # ==========================================
 
 async def save_donations_to_discord():
-    chan = bot.get_channel(DONATION_MEMORY_CHANNEL_ID)
-    if not chan:
-        return
-    payload = json.dumps(donations_data, ensure_ascii=False)
-    async for msg in chan.history(limit=20):
-        if msg.author.id == bot.user.id and msg.content.startswith("DONATION_SAVE|"):
-            try:
-                await msg.delete()
-            except:
-                pass
-            break
-    await chan.send(f"DONATION_SAVE|{payload}")
+    await save_json_to_channel(DONATION_MEMORY_CHANNEL_ID, "DONATION_SAVE|", donations_data, search_limit=50)
 
 async def load_donations_from_discord():
     global donations_data
-    chan = bot.get_channel(DONATION_MEMORY_CHANNEL_ID)
-    if not chan:
-        return
-    async for msg in chan.history(limit=20):
-        if msg.author.id == bot.user.id and msg.content.startswith("DONATION_SAVE|"):
-            try:
-                donations_data = json.loads(msg.content[len("DONATION_SAVE|"):])
-            except:
-                donations_data = {}
-            break
+    donations_data = await load_json_from_channel(DONATION_MEMORY_CHANNEL_ID, "DONATION_SAVE|", {}, search_limit=50)
 
 def build_scoreboard_embed():
     sorted_donors = sorted(
