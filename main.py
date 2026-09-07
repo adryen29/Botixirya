@@ -117,7 +117,10 @@ FUNDS_CLOTHING_CHANNEL_ID = 1483508939504091187  # Salon funds Clothing
 
 # --- Rôles et zones à vérifier toutes les 20 minutes ---
 PERM_UNVERIFIED_EXCEPTION_CATEGORY = 1478663941168037898
-PERM_UNVERIFIED_EXCEPTION_CHANNEL = 1478669348989177997
+PERM_UNVERIFIED_EXCEPTION_CHANNELS = {
+    1478669348989177997,
+    1546173960662814751,  # Accessible même sans règlement accepté ni compte Roblox vérifié
+}
 
 # --- Système de niveaux ---
 LEVEL_UP_CHANNEL_ID = 1483746384610857092        # Salon de ping lors d'un niveau à rôle
@@ -1797,7 +1800,7 @@ async def enforce_permissions():
 
             if unverified_role:
                 is_unverified_exception = (
-                    channel.id == PERM_UNVERIFIED_EXCEPTION_CHANNEL
+                    channel.id in PERM_UNVERIFIED_EXCEPTION_CHANNELS
                     or channel.id == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                     or getattr(channel, 'category_id', None) == PERM_UNVERIFIED_EXCEPTION_CATEGORY
                 )
