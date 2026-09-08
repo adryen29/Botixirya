@@ -207,7 +207,7 @@ LOGGED_ADMIN_COMMANDS = {
     'tempmute', 'unmute', 'safe', 'removesafe', 'TicketCreatingChannel',
     'SetTableChannel', 'AddTableLine', 'SetTableValue', 'RemoveTableValue',
     'GetTableUserValue', 'RemoveTopBoardRobux', 'backup', 'COMMANDSON',
-    'setuprobloxverify', 'cashout', 'AdjustInviteBalance', 'ResetInviteFlag',
+    'setuprobloxverify', 'ManualLink', 'cashout', 'AdjustInviteBalance', 'ResetInviteFlag',
     'warn', 'bigwarn', 'unwarn', 'unbigwarn'
 }
 
@@ -383,6 +383,43 @@ async def save_roblox_links():
 async def load_roblox_links():
     global roblox_links
     roblox_links = await load_json_from_channel(ROBLOX_LINKS_CHANNEL_ID, "ROBLOX_LINKS|", {}, search_limit=50)
+
+
+async def resolve_roblox_user(identifier: str):
+    """
+    Résout un identifiant Roblox (pseudo OU ID numérique) via l'API publique Roblox
+    (aucune authentification requise). Retourne (roblox_id, roblox_username) sous
+    forme de chaînes, ou (None, None) si introuvable / erreur réseau.
+    """
+    identifier = identifier.strip()
+    if not identifier:
+        return None, None
+    try:
+        async with aiohttp.ClientSession() as session:
+            if identifier.isdigit():
+                async with session.get(
+                    f"https://users.roblox.com/v1/users/{identifier}",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status != 200:
+                        return None, None
+                    data = await resp.json()
+                    return str(data.get("id")), data.get("name")
+            else:
+                async with session.post(
+                    "https://users.roblox.com/v1/usernames/users",
+                    json={"usernames": [identifier], "excludeBannedUsers": False},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status != 200:
+                        return None, None
+                    data = await resp.json()
+                    results = data.get("data", [])
+                    if not results:
+                        return None, None
+                    return str(results[0].get("id")), results[0].get("name")
+    except Exception:
+        return None, None
 
 
 async def assign_roblox_role(discord_user_id: int, roblox_id: str, roblox_username: str):
@@ -1873,8 +1910,11 @@ async def enforce_permissions():
                         pass
 
             if roblox_linked_role:
-                is_verify_channel = (channel.id == ROBLOX_VERIFY_CHANNEL_ID)
-                if is_verify_channel:
+                is_linked_exception = (
+                    channel.id == ROBLOX_VERIFY_CHANNEL_ID
+                    or channel.id in PERM_PRE_VERIFICATION_EXCEPTION_CHANNELS
+                )
+                if is_linked_exception:
                     target_ow = channel.overwrites_for(roblox_linked_role)
                     if target_ow.read_messages is not True:
                         try:
@@ -1882,7 +1922,7 @@ async def enforce_permissions():
                                 roblox_linked_role,
                                 read_messages=True,
                                 send_messages=True,
-                                reason="enforce_permissions : roblox-lié autorisé dans vérification"
+                                reason="enforce_permissions : roblox-lié autorisé (vérification / exception)"
                             )
                             channel_changed = True
                         except:
@@ -2653,6 +2693,18 @@ async def help(ctx):
             f"**{COMMAND_PREFIX}ResetInviteFlag @user** : Permet à un ID de compter à nouveau comme nouvelle invitation.\n"
             f"→ Confirmation des paiements via bouton dans <#{INVITE_CASHOUT_CHANNEL_ID}>."
         ), inline=False)
+        embed.add_field(name="🎮 Owner — Liaison Roblox manuelle", value=(
+            f"**{COMMAND_PREFIX}ManualLink @user <pseudo_ou_id_roblox>**\n"
+            f"→ Lie manuellement un compte Discord à un compte Roblox, sans passer par le flux "
+            f"OAuth habituel (utile si la vérification automatique pose problème).\n"
+            f"→ Accepte soit le **pseudo Roblox** (ex: `SuperJoueur123`), soit l'**ID numérique** "
+            f"(ex: `123456789`) — le bot va chercher l'info correspondante via l'API Roblox.\n"
+            f"→ Attribue automatiquement le rôle **Membre**, retire Non-vérifié / Roblox-lié si présents, "
+            f"et journalise l'action dans <#{VERIF_HISTORY_LOG_CHANNEL_ID}>.\n"
+            f"→ Un compte Roblox ne peut être lié qu'à un seul Discord à la fois : la commande refuse "
+            f"si le compte Roblox est déjà lié ailleurs.\n"
+            f"→ Exemple : `{COMMAND_PREFIX}ManualLink @Jean SuperJoueur123`"
+        ), inline=False)
         embed.add_field(name="💾 Owner — Backup & Setup", value=(
             f"**{COMMAND_PREFIX}backup** : Copie le serveur principal → backup *(backup only)*.\n"
             f"**{COMMAND_PREFIX}COMMANDSON** : Active toutes les commandes sur le serveur backup.\n"
@@ -2684,6 +2736,88 @@ async def setuprobloxverify(ctx):
     )
     await chan.send(embed=embed, view=RobloxVerifyView())
     await ctx.send(f"✅ Message de vérification envoyé dans {chan.mention}.", delete_after=5)
+
+@bot.command()
+async def ManualLink(ctx, user: discord.Member, *, roblox_identifier: str):
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Commande réservée au propriétaire.")
+
+    async with ctx.typing():
+        roblox_id, roblox_username = await resolve_roblox_user(roblox_identifier)
+
+    if not roblox_id:
+        return await ctx.send(
+            f"❌ Impossible de trouver un compte Roblox correspondant à `{roblox_identifier}`.\n"
+            f"Vérifie l'orthographe du pseudo, ou utilise directement l'ID numérique Roblox."
+        )
+
+    # Un compte Roblox ne peut être lié qu'à un seul membre Discord à la fois
+    for uid, data in roblox_links.items():
+        if data.get("roblox_id") == roblox_id and int(uid) != user.id:
+            existing_member = ctx.guild.get_member(int(uid))
+            existing_mention = existing_member.mention if existing_member else f"`{uid}`"
+            return await ctx.send(
+                f"❌ Le compte Roblox **{roblox_username}** (`{roblox_id}`) est déjà lié à {existing_mention}.\n"
+                f"Un compte Roblox ne peut être lié qu'à un seul membre Discord à la fois."
+            )
+
+    linked_at = discord.utils.utcnow().strftime("%d/%m/%Y à %H:%M")
+    roblox_links[str(user.id)] = {
+        "roblox_id": roblox_id,
+        "roblox_username": roblox_username,
+        "linked_at": linked_at
+    }
+    await save_roblox_links()
+
+    linked_role     = ctx.guild.get_role(ROLE_ROBLOX_LINKED_ID)
+    verified_role   = ctx.guild.get_role(ROLE_VERIFIED_ID)
+    unverified_role = ctx.guild.get_role(ROLE_UNVERIFIED_ID)
+
+    try:
+        if verified_role:
+            await user.add_roles(verified_role, reason=f"Liaison Roblox manuelle par {ctx.author}")
+        if linked_role and linked_role in user.roles:
+            await user.remove_roles(linked_role, reason="Liaison Roblox manuelle")
+        if unverified_role and unverified_role in user.roles:
+            await user.remove_roles(unverified_role, reason="Liaison Roblox manuelle")
+    except Exception as e:
+        return await ctx.send(
+            f"⚠️ Liaison enregistrée (`{roblox_username}` → {user.mention}) mais erreur lors de "
+            f"l'attribution des rôles : {e}"
+        )
+
+    verif_chan = bot.get_channel(VERIF_HISTORY_LOG_CHANNEL_ID)
+    if verif_chan:
+        embed = discord.Embed(
+            title="🔧 Compte Roblox lié manuellement",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Discord",   value=f"{user.mention} (`{user.id}`)", inline=True)
+        embed.add_field(name="Roblox",    value=f"**{roblox_username}**",       inline=True)
+        embed.add_field(name="Roblox ID", value=f"`{roblox_id}`",               inline=True)
+        embed.add_field(name="Lié par",   value=ctx.author.mention,             inline=True)
+        embed.add_field(
+            name="Profil Roblox",
+            value=f"[Voir sur Roblox](https://www.roblox.com/users/{roblox_id}/profile)",
+            inline=True
+        )
+        await verif_chan.send(embed=embed)
+
+    try:
+        await user.send(
+            f"✅ **Ton compte Roblox a été lié manuellement par un membre du staff.**\n"
+            f"Roblox : **{roblox_username}**\n"
+            f"Bienvenue dans notre communauté !"
+        )
+    except:
+        pass
+
+    await ctx.send(
+        f"✅ {user.mention} a été lié manuellement au compte Roblox **{roblox_username}** (`{roblox_id}`).\n"
+        f"Rôle Membre attribué."
+    )
 
 @bot.command()
 @commands.has_permissions(administrator=True)
