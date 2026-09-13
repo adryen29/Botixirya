@@ -115,6 +115,13 @@ ROBLOX_GROUP_CLOTHING = 16522178                 # Groupe Aavixyria Clothing
 FUNDS_UGC_CHANNEL_ID = 1483505991994835057       # Salon funds UGC
 FUNDS_CLOTHING_CHANNEL_ID = 1483508939504091187  # Salon funds Clothing
 
+# --- Suivi des achats Roblox (groupe UGC + Clothing) ---
+PURCHASE_LOG_CHANNEL_ID = 1547572927984173056         # Logs visuels des achats + sauvegarde JSON (double usage)
+PURCHASE_LEADERBOARD_CHANNEL_ID = 1547572579332792420  # Topboard des plus gros acheteurs
+TOTAL_RAISED_VOICE_CHANNEL_ID = 1547575628054925322     # Salon vocal affichant le total raised cumulatif
+TOTAL_RAISED_LOG_CHANNEL_ID = 1547575762931032105        # Sauvegarde du total raised cumulatif
+PURCHASE_PROCESSED_IDS_CAP = 500  # Nombre d'IDs de transactions conservés pour la déduplication
+
 # --- Rôles et zones à vérifier toutes les 20 minutes ---
 PERM_UNVERIFIED_EXCEPTION_CATEGORY = 1478663941168037898
 PERM_PRE_VERIFICATION_EXCEPTION_CHANNELS = {
@@ -200,6 +207,13 @@ already_invited_ids = set()   # IDs (str) déjà comptés comme invités une foi
 # --- Système de warns / big warns ---
 warn_data = {}   # {"guild_id:user_id": {"warns": int, "last_warn_at": float, "big_warns": int, "last_bigwarn_at": float, "history": [...]}}
 
+# --- Suivi des achats Roblox ---
+purchase_data = {}              # {tx_id: {"buyer_id","buyer_name","item_id","item_name","item_type","amount","group_id","at"}}
+purchase_counts = {}            # {roblox_id: {"username","purchase_count","total_spent"}}
+purchase_processed_ids = {}     # {"UGC": [tx_id, ...], "Clothing": [tx_id, ...]} — déduplication indépendante par groupe
+purchase_leaderboard_message_ids = {"discord": None, "all": None}  # IDs des 2 messages de classement (édités en place)
+total_raised = 0                # Total cumulatif de Robux générés (2 groupes confondus) depuis la valeur de départ définie
+
 # --- Commandes admin/modo à tracer automatiquement ---
 LOGGED_ADMIN_COMMANDS = {
     'kill', 'setcountchannel', 'setscore', 'lock', 'unlock', 'restore',
@@ -221,6 +235,7 @@ MEMORY_CHANNELS = {
     ADMIN_ACTIONS_LOG_CHANNEL_ID, VERIF_HISTORY_LOG_CHANNEL_ID,
     INVITE_ARRIVAL_CHANNEL_ID, INVITE_DEPART_CHANNEL_ID, INVITE_CASHOUT_CHANNEL_ID,
     INVITE_DATA_CHANNEL_ID, ALREADY_INVITED_CHANNEL_ID, WARN_LOG_CHANNEL_ID, WARN_DISPLAY_CHANNEL_ID,
+    PURCHASE_LOG_CHANNEL_ID, PURCHASE_LEADERBOARD_CHANNEL_ID, TOTAL_RAISED_LOG_CHANNEL_ID,
 }
 # ==========================================
 
@@ -803,6 +818,276 @@ async def check_warn_expiry():
             changed = True
     if changed:
         await save_warn_data()
+
+# ==========================================
+# SYSTÈME DE SUIVI DES ACHATS ROBLOX — PERSISTANCE DISCORD
+# ==========================================
+
+async def save_purchase_data():
+    payload = {
+        "purchase_data": purchase_data,
+        "purchase_counts": purchase_counts,
+        "purchase_processed_ids": purchase_processed_ids,
+        "purchase_leaderboard_message_ids": purchase_leaderboard_message_ids,
+    }
+    await save_json_to_channel(PURCHASE_LOG_CHANNEL_ID, "PURCHASE_DATA|", payload, search_limit=200)
+
+async def load_purchase_data():
+    global purchase_data, purchase_counts, purchase_processed_ids, purchase_leaderboard_message_ids
+    payload = await load_json_from_channel(PURCHASE_LOG_CHANNEL_ID, "PURCHASE_DATA|", None, search_limit=200)
+    if payload:
+        purchase_data = payload.get("purchase_data", {})
+        purchase_counts = payload.get("purchase_counts", {})
+        purchase_processed_ids = payload.get("purchase_processed_ids", {})
+        purchase_leaderboard_message_ids = payload.get("purchase_leaderboard_message_ids", {"discord": None, "all": None})
+
+async def save_total_raised():
+    await save_json_to_channel(TOTAL_RAISED_LOG_CHANNEL_ID, "TOTAL_RAISED|", {"total_raised": total_raised}, search_limit=50)
+
+async def load_total_raised():
+    global total_raised
+    payload = await load_json_from_channel(TOTAL_RAISED_LOG_CHANNEL_ID, "TOTAL_RAISED|", {"total_raised": 0}, search_limit=50)
+    total_raised = payload.get("total_raised", 0)
+
+# ==========================================
+# SYSTÈME DE SUIVI DES ACHATS ROBLOX — LOGIQUE
+# ==========================================
+
+def format_robux_compact(amount) -> str:
+    """1000 -> '1.0K' (1 décimale) · 1 000 000 -> '1.00M' (2 décimales)."""
+    amount = float(amount)
+    if amount >= 1_000_000:
+        return f"{amount / 1_000_000:.2f}M"
+    elif amount >= 1_000:
+        return f"{amount / 1_000:.1f}K"
+    else:
+        return f"{amount:.0f}"
+
+async def fetch_roblox_avatar_url(roblox_id: str):
+    """Récupère l'URL de la photo de profil (avatar-headshot) d'un utilisateur Roblox — API publique, sans auth."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+                params={"userIds": roblox_id, "size": "150x150", "format": "Png", "isCircular": "false"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                results = data.get("data", [])
+                if results:
+                    return results[0].get("imageUrl")
+    except Exception:
+        pass
+    return None
+
+async def log_purchase(tx: dict, group_label: str):
+    """Journalise un achat détecté : embed visuel + mise à jour des agrégats acheteur/total."""
+    global total_raised
+
+    agent = tx.get("agent", {}) or {}
+    details = tx.get("details", {}) or {}
+    currency = tx.get("currency", {}) or {}
+
+    tx_id = str(tx.get("id", ""))
+    buyer_id = str(agent.get("id", "?"))
+    buyer_name = agent.get("name", "Inconnu")
+    item_id = details.get("id")
+    item_name = details.get("name", "Objet inconnu")
+    item_type = details.get("type", "Asset")
+    amount = currency.get("amount", 0)
+    created_at = tx.get("created", discord.utils.utcnow().isoformat())
+
+    purchase_data[tx_id] = {
+        "buyer_id": buyer_id, "buyer_name": buyer_name,
+        "item_id": item_id, "item_name": item_name, "item_type": item_type,
+        "amount": amount, "group_label": group_label, "at": created_at
+    }
+
+    entry = purchase_counts.get(buyer_id, {"username": buyer_name, "purchase_count": 0, "total_spent": 0})
+    entry["username"] = buyer_name
+    entry["purchase_count"] = entry.get("purchase_count", 0) + 1
+    entry["total_spent"] = entry.get("total_spent", 0) + amount
+    purchase_counts[buyer_id] = entry
+
+    total_raised += amount
+
+    chan = bot.get_channel(PURCHASE_LOG_CHANNEL_ID)
+    if chan:
+        avatar_url = await fetch_roblox_avatar_url(buyer_id)
+        item_url = f"https://www.roblox.com/catalog/{item_id}" if item_id else None
+        item_display = f"[{item_name}]({item_url})" if item_url else item_name
+
+        embed = discord.Embed(title="🛒 Nouvel achat", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        if avatar_url:
+            embed.set_thumbnail(url=avatar_url)
+        embed.add_field(name="Acheteur", value=f"**{buyer_name}**", inline=True)
+        embed.add_field(name="ID Roblox", value=f"`{buyer_id}`", inline=True)
+        embed.add_field(name="Groupe", value=group_label, inline=True)
+        embed.add_field(name="Objet", value=item_display, inline=True)
+        embed.add_field(name="Montant", value=f"**{amount}** Robux", inline=True)
+        embed.add_field(
+            name="Profil",
+            value=f"[Voir sur Roblox](https://www.roblox.com/users/{buyer_id}/profile)",
+            inline=True
+        )
+        await chan.send(embed=embed)
+
+def build_purchase_leaderboard_embeds(guild):
+    reverse_links = {}
+    for discord_id, info in roblox_links.items():
+        rid = info.get("roblox_id")
+        if rid:
+            reverse_links[str(rid)] = discord_id
+
+    all_sorted = sorted(purchase_counts.items(), key=lambda x: x[1].get("total_spent", 0), reverse=True)
+    medals = ["🥇", "🥈", "🥉"]
+
+    linked_entries = [(rid, data) for rid, data in all_sorted if rid in reverse_links]
+    embed_discord = discord.Embed(title="🏆 Top acheteurs — Membres Discord liés", color=discord.Color.gold())
+    if linked_entries:
+        lines = []
+        for i, (rid, data) in enumerate(linked_entries[:15]):
+            discord_id = reverse_links[rid]
+            member = guild.get_member(int(discord_id))
+            mention = member.mention if member else f"<@{discord_id}>"
+            medal = medals[i] if i < 3 else f"`#{i + 1}`"
+            lines.append(
+                f"{medal} {mention} — **{format_robux_compact(data.get('total_spent', 0))}** Robux "
+                f"({data.get('purchase_count', 0)} achat(s))"
+            )
+        embed_discord.description = "\n".join(lines)
+    else:
+        embed_discord.description = "*Aucun achat enregistré pour le moment.*"
+
+    embed_all = discord.Embed(title="🏆 Top acheteurs — Tous (pseudo Roblox)", color=discord.Color.blurple())
+    if all_sorted:
+        lines = []
+        for i, (rid, data) in enumerate(all_sorted[:15]):
+            medal = medals[i] if i < 3 else f"`#{i + 1}`"
+            lines.append(
+                f"{medal} **{data.get('username', rid)}** — **{format_robux_compact(data.get('total_spent', 0))}** Robux "
+                f"({data.get('purchase_count', 0)} achat(s))"
+            )
+        embed_all.description = "\n".join(lines)
+    else:
+        embed_all.description = "*Aucun achat enregistré pour le moment.*"
+
+    return embed_discord, embed_all
+
+async def refresh_purchase_leaderboards():
+    chan = bot.get_channel(PURCHASE_LEADERBOARD_CHANNEL_ID)
+    if not chan:
+        return
+    guild = chan.guild
+    embed_discord, embed_all = build_purchase_leaderboard_embeds(guild)
+
+    for key, embed in (("discord", embed_discord), ("all", embed_all)):
+        msg_id = purchase_leaderboard_message_ids.get(key)
+        msg = None
+        if msg_id:
+            try:
+                msg = await chan.fetch_message(msg_id)
+                await msg.edit(embed=embed)
+            except:
+                msg = None
+        if not msg:
+            msg = await chan.send(embed=embed)
+            purchase_leaderboard_message_ids[key] = msg.id
+
+    await save_purchase_data()
+
+async def check_group_purchases_for(group_id: int, group_label: str, session: aiohttp.ClientSession, headers: dict):
+    """Récupère les ventes récentes d'un groupe Roblox et journalise celles qui n'ont pas déjà été traitées."""
+    try:
+        async with session.get(
+            f"https://economy.roblox.com/v2/groups/{group_id}/transactions",
+            params={"transactionType": "Sale", "limit": "100", "sortOrder": "Desc"},
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.status != 200:
+                return False
+            payload = await resp.json()
+    except Exception:
+        return False
+
+    transactions = payload.get("data", [])
+    if not transactions:
+        return False
+
+    ids_for_group = purchase_processed_ids.setdefault(group_label, [])
+    is_first_run = len(ids_for_group) == 0
+
+    new_ones = [tx for tx in transactions if str(tx.get("id", "")) not in ids_for_group]
+    if not new_ones:
+        return False
+
+    # Premier démarrage pour CE groupe : on enregistre juste le point de départ, rien à journaliser rétroactivement
+    if is_first_run:
+        for tx in transactions:
+            tx_id = str(tx.get("id", ""))
+            if tx_id:
+                ids_for_group.append(tx_id)
+        del ids_for_group[:-PURCHASE_PROCESSED_IDS_CAP]
+        return True
+
+    # Les plus anciennes d'abord pour un ordre chronologique correct dans les logs
+    for tx in reversed(new_ones):
+        tx_id = str(tx.get("id", ""))
+        await log_purchase(tx, group_label)
+        ids_for_group.append(tx_id)
+
+    del ids_for_group[:-PURCHASE_PROCESSED_IDS_CAP]
+    return True
+
+@tasks.loop(minutes=5)
+async def check_group_purchases():
+    cookie = os.getenv("ROBLOX_COOKIE", "")
+    if not cookie:
+        return  # déjà signalé par update_roblox_funds, pas la peine de dupliquer l'alerte
+
+    headers = {
+        "Cookie": f".ROBLOSECURITY={cookie}",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://www.roblox.com"
+    }
+
+    async with aiohttp.ClientSession() as session:
+        csrf_token = None
+        try:
+            async with session.post(
+                "https://auth.roblox.com/v2/logout",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                csrf_token = resp.headers.get("x-csrf-token")
+        except:
+            pass
+        if csrf_token:
+            headers["X-CSRF-TOKEN"] = csrf_token
+
+        changed_ugc = await check_group_purchases_for(ROBLOX_GROUP_UGC, "UGC", session, headers)
+        changed_clothing = await check_group_purchases_for(ROBLOX_GROUP_CLOTHING, "Clothing", session, headers)
+
+    if changed_ugc or changed_clothing:
+        await save_purchase_data()
+        await save_total_raised()
+        await refresh_purchase_leaderboards()
+
+@tasks.loop(minutes=10)
+async def update_total_raised_counter():
+    chan = bot.get_channel(TOTAL_RAISED_VOICE_CHANNEL_ID)
+    if not chan:
+        return
+    new_name = f"💵 Total Raised : {format_robux_compact(total_raised)}"
+    if chan.name != new_name:
+        try:
+            await chan.edit(name=new_name, reason="Botixirya : mise à jour du total raised")
+        except Exception as e:
+            await send_log(f"⚠️ **Total Raised** : impossible de renommer le salon — `{e}`")
 
 # ==========================================
 # TEMPBAN — PERSISTANCE DISCORD
@@ -2140,6 +2425,11 @@ async def on_ready():
     # --- Système de warns / big warns ---
     await load_warn_data()
 
+    # --- Système de suivi des achats Roblox ---
+    await load_purchase_data()
+    await load_total_raised()
+    await refresh_purchase_leaderboards()
+
     if not check_giveaways.is_running():
         check_giveaways.start()
     if not check_bans.is_running():
@@ -2158,6 +2448,10 @@ async def on_ready():
         update_online_counter.start()
     if not check_warn_expiry.is_running():
         check_warn_expiry.start()
+    if not check_group_purchases.is_running():
+        check_group_purchases.start()
+    if not update_total_raised_counter.is_running():
+        update_total_raised_counter.start()
 
     await send_log(f"✅ **Botixirya** prêt. Score : `{current_count}` | Configs tickets : `{len(ticket_configs)}`")
 
