@@ -151,7 +151,7 @@ DONATION_MEMORY_CHANNEL_ID = 1484303351649665116      # Salon logs/sauvegarde do
 DONATION_SECRET = os.getenv("DONATION_SECRET", "change_moi")  # Token secret Roblox → bot
 
 # --- Vérification OAuth Roblox ---
-ROBLOX_CLIENT_ID     = "4841751639344220253"
+ROBLOX_CLIENT_ID     = "1726830513027825392"
 ROBLOX_CLIENT_SECRET = os.getenv("ROBLOX_CLIENT_SECRET", "")
 ROBLOX_REDIRECT_URI  = "https://vulnerable-angelfish-aavixyria-79722b21.koyeb.app/roblox/callback"
 ROLE_ROBLOX_LINKED_ID    = 1484610496861700247   # Rôle attribué après liaison Roblox
